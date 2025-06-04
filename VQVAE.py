@@ -13,7 +13,7 @@ from torch.utils.data import Dataset, DataLoader
 
 
 class VDBLeafDataset(Dataset):
-    def __init__(self, npy_files, transform=None):
+    def __init__(self, npy_files, transform=None, include_origins=False):
         """
         Dataset for loading multiple .npy files containing VDB leaf data
 
@@ -23,6 +23,9 @@ class VDBLeafDataset(Dataset):
         """
         self.npy_files = npy_files
         self.transform = transform
+        self.include_origins = include_origins
+        if include_origins:
+            self.origin_files = [str(Path(f).with_suffix("_origins.npy")) for f in npy_files]
 
         # Load and process the shape information from all files
         self.file_offsets = [0]
@@ -47,6 +50,11 @@ class VDBLeafDataset(Dataset):
         data = np.load(self.npy_files[file_idx])
         leaf_data = data[local_idx].astype(np.float32)
 
+        origin = None
+        if self.include_origins:
+            origin_data = np.load(self.origin_files[file_idx])
+            origin = origin_data[local_idx].astype(np.int32)
+
         # Convert to tensor
         leaf_tensor = torch.from_numpy(leaf_data)
 
@@ -54,6 +62,8 @@ class VDBLeafDataset(Dataset):
         if self.transform:
             leaf_tensor = self.transform(leaf_tensor)
 
+        if self.include_origins:
+            return leaf_tensor.unsqueeze(0), origin
         return leaf_tensor.unsqueeze(0)  # Add channel dimension: [1, 8, 8, 8]
 
 
@@ -290,16 +300,24 @@ def evaluate_model(model, test_loader, args):
     return avg_mse, avg_psnr
 
 
-def compress_dataset(model, data_loader, output_file, args):
-    """Compress a dataset and save indices to binary file"""
+def compress_dataset(model, data_loader, output_file, args, origins=None):
+    """Compress a dataset and save indices to binary file.
+    If ``origins`` is provided, it should be a NumPy array of shape ``(N,3)``
+    with the leaf coordinates matching the order of the dataset. These
+    positions will be embedded in the resulting ``.vqvdb`` file.
+    """
     device = torch.device(args.device)
     model = model.to(device)
     model.eval()
 
     # Get expected index shape from a batch
     sample_batch = next(iter(data_loader))
+    if isinstance(sample_batch, (list, tuple)):
+        sample_input = sample_batch[0]
+    else:
+        sample_input = sample_batch
     with torch.no_grad():
-        _, _, indices = model(sample_batch.to(device))
+        _, _, indices = model(sample_input.to(device))
     index_shape = indices.shape[1:]  # Shape without batch dimension
 
     # Calculate bits needed to represent each index
@@ -308,16 +326,26 @@ def compress_dataset(model, data_loader, output_file, args):
 
     with open(output_file, 'wb') as f:
         # Write header: magic number, version, num_embeddings, shape dimensions
-        f.write(b'VQVDB\x01')  # Magic + version 1
+        version = 2 if origins is not None else 1
+        f.write(b'VQVDB')
+        f.write(struct.pack('<B', version))
         f.write(struct.pack('<I', args.num_embeddings))
         f.write(struct.pack('<B', len(index_shape)))
         for dim in index_shape:
             f.write(struct.pack('<H', dim))
 
+        # If we have origins, store them before the index batches
+        if origins is not None:
+            f.write(struct.pack('<I', origins.shape[0]))
+            f.write(origins.astype(np.int32).tobytes())
+
         # Process all batches
         with torch.no_grad():
             for batch in data_loader:
-                x = batch.to(device)
+                if isinstance(batch, (list, tuple)):
+                    x = batch[0].to(device)
+                else:
+                    x = batch.to(device)
                 _, _, indices = model(x)
 
                 # Save indices (simple method - could be improved with entropy coding)
@@ -360,6 +388,8 @@ def main():
     parser.add_argument("--device", type=str, default="cuda", help="Device (cuda or cpu)")
     parser.add_argument("--val_split", type=float, default=0.1, help="Validation split ratio")
     parser.add_argument("--test_split", type=float, default=0.1, help="Test split ratio")
+    parser.add_argument("--origins_file", type=str, default=None,
+                        help="Optional NPY file containing leaf origins to embed in the .vqvdb output")
     args = parser.parse_args()
 
     # Create output directory
@@ -387,7 +417,7 @@ def main():
     # Create datasets and dataloaders
     train_dataset = VDBLeafDataset(train_files)
     val_dataset = VDBLeafDataset(val_files)
-    test_dataset = VDBLeafDataset(test_files)
+    test_dataset = VDBLeafDataset(test_files, include_origins=args.origins_file is not None)
 
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True)
@@ -417,8 +447,9 @@ def main():
 
     # Compress test dataset
     print("Compressing test dataset...")
-    compressed_file = os.path.join(args.output_dir, "compressed_indices.bin")
-    compression_ratio = compress_dataset(model, test_loader, compressed_file, args)
+    compressed_file = os.path.join(args.output_dir, "compressed_indices.vqvdb")
+    origins = np.load(args.origins_file) if args.origins_file else None
+    compression_ratio = compress_dataset(model, test_loader, compressed_file, args, origins)
 
     # Save metrics
     with open(os.path.join(args.output_dir, "metrics.txt"), "w") as f:
