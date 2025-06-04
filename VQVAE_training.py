@@ -149,6 +149,7 @@ class VQVAE(nn.Module):
         z_q, _, indices = self.vq(z)
         return z_q, indices
 
+    @torch.jit.export
     def decode(self, z_q):
         return self.decoder(z_q)
 
