@@ -13,9 +13,9 @@
 // Simple NPY file writer for float32 and int32 arrays
 class NpyWriter {
    public:
-        static bool writeFloat32(const std::filesystem::path& filename, const std::vector<float>& data, const std::vector<size_t>& shape) {
-                std::ofstream file(filename, std::ios::binary);
-                if (!file) return false;
+	static bool writeFloat32(const std::filesystem::path& filename, const std::vector<float>& data, const std::vector<size_t>& shape) {
+		std::ofstream file(filename, std::ios::binary);
+		if (!file) return false;
 
 		// Calculate total elements and verify data size
 		size_t total_elements = 1;
@@ -51,47 +51,47 @@ class NpyWriter {
 		file.write(header.data(), header_size);
 
 		// Write data
-                file.write(reinterpret_cast<const char*>(data.data()), data.size() * sizeof(float));
+		file.write(reinterpret_cast<const char*>(data.data()), data.size() * sizeof(float));
 
-                return file.good();
-        }
+		return file.good();
+	}
 
-        static bool writeInt32(const std::filesystem::path& filename, const std::vector<int>& data, const std::vector<size_t>& shape) {
-                std::ofstream file(filename, std::ios::binary);
-                if (!file) return false;
+	static bool writeInt32(const std::filesystem::path& filename, const std::vector<int>& data, const std::vector<size_t>& shape) {
+		std::ofstream file(filename, std::ios::binary);
+		if (!file) return false;
 
-                size_t total_elements = 1;
-                for (auto dim : shape) total_elements *= dim;
-                if (data.size() != total_elements) {
-                        std::cerr << "Data size mismatch with shape dimensions\n";
-                        return false;
-                }
+		size_t total_elements = 1;
+		for (auto dim : shape) total_elements *= dim;
+		if (data.size() != total_elements) {
+			std::cerr << "Data size mismatch with shape dimensions\n";
+			return false;
+		}
 
-                std::string header = "{'descr': '<i4', 'fortran_order': False, 'shape': (";
-                for (size_t i = 0; i < shape.size(); ++i) {
-                        header += std::to_string(shape[i]);
-                        if (i < shape.size() - 1) header += ", ";
-                }
-                header += "), }";
+		std::string header = "{'descr': '<i4', 'fortran_order': False, 'shape': (";
+		for (size_t i = 0; i < shape.size(); ++i) {
+			header += std::to_string(shape[i]);
+			if (i < shape.size() - 1) header += ", ";
+		}
+		header += "), }";
 
-                size_t header_len = header.size() + 1;
-                size_t padding_needed = (64 - ((10 + header_len) % 64)) % 64;
-                header.append(padding_needed, ' ');
-                header.push_back('\n');
+		size_t header_len = header.size() + 1;
+		size_t padding_needed = (64 - ((10 + header_len) % 64)) % 64;
+		header.append(padding_needed, ' ');
+		header.push_back('\n');
 
-                file.write("\x93NUMPY", 6);
-                const uint8_t major = 1, minor = 0;
-                file.write(reinterpret_cast<const char*>(&major), 1);
-                file.write(reinterpret_cast<const char*>(&minor), 1);
+		file.write("\x93NUMPY", 6);
+		const uint8_t major = 1, minor = 0;
+		file.write(reinterpret_cast<const char*>(&major), 1);
+		file.write(reinterpret_cast<const char*>(&minor), 1);
 
-                uint16_t header_size = static_cast<uint16_t>(header.size());
-                file.write(reinterpret_cast<char*>(&header_size), 2);
-                file.write(header.data(), header_size);
+		uint16_t header_size = static_cast<uint16_t>(header.size());
+		file.write(reinterpret_cast<char*>(&header_size), 2);
+		file.write(header.data(), header_size);
 
-                file.write(reinterpret_cast<const char*>(data.data()), data.size() * sizeof(int));
+		file.write(reinterpret_cast<const char*>(data.data()), data.size() * sizeof(int));
 
-                return file.good();
-        }
+		return file.good();
+	}
 };
 
 template <typename GridType>
@@ -143,9 +143,9 @@ bool extractLeafData(const std::string& vdbFilePath, const std::string& gridName
 	const uint32_t leafCount = leafManager.leafCount();
 	std::cout << "Found " << leafCount << " leaf nodes\n";
 
-        // Extract leaf data and origins
-        std::vector<float> leafData(leafCount * GridType::TreeType::LeafNodeType::SIZE);
-        std::vector<int> originsData(leafCount * 3);
+	// Extract leaf data and origins
+	std::vector<float> leafData(leafCount * GridType::TreeType::LeafNodeType::SIZE);
+	std::vector<int> originsData(leafCount * 3);
 
 	size_t leafIndex = 0;
 	constexpr int LEAF_DIM = 8;
@@ -153,10 +153,10 @@ bool extractLeafData(const std::string& vdbFilePath, const std::string& gridName
 		const auto& leaf = *iter;
 
 		// Get origin of this leaf
-                Coord origin = leaf.origin();
-                originsData[leafIndex * 3 + 0] = origin.x();
-                originsData[leafIndex * 3 + 1] = origin.y();
-                originsData[leafIndex * 3 + 2] = origin.z();
+		Coord origin = leaf.origin();
+		originsData[leafIndex * 3 + 0] = origin.x();
+		originsData[leafIndex * 3 + 1] = origin.y();
+		originsData[leafIndex * 3 + 2] = origin.z();
 
 		// Extract all voxels in the leaf (8x8x8)
 		for (int z = 0; z < LEAF_DIM; z++) {
@@ -176,21 +176,23 @@ bool extractLeafData(const std::string& vdbFilePath, const std::string& gridName
 		leafIndex++;
 	}
 
-        // Write voxel data
-        std::vector<size_t> shape = {leafCount, LEAF_DIM, LEAF_DIM, LEAF_DIM};
-        bool success = NpyWriter::writeFloat32(outputPath, leafData, shape);
+	// Write voxel data
+	std::vector<size_t> shape = {leafCount, LEAF_DIM, LEAF_DIM, LEAF_DIM};
+	bool success = NpyWriter::writeFloat32(outputPath, leafData, shape);
 
-        // Also write origins alongside, using the same base name
-        std::filesystem::path originPath = std::filesystem::path(outputPath).replace_extension("_origins.npy");
-        std::vector<size_t> originShape = {leafCount, 3};
-        bool originSuccess = NpyWriter::writeInt32(originPath, originsData, originShape);
+	// Also write origins in a separate `/origin` folder
+	std::filesystem::path outDir = std::filesystem::path(outputPath).parent_path();
+	std::filesystem::path originDir = outDir / "origin";
+	std::filesystem::create_directories(originDir);
+	std::filesystem::path originPath = originDir / std::filesystem::path(outputPath).filename().replace_extension("_origins.npy");
+	std::vector<size_t> originShape = {leafCount, 3};
+	bool originSuccess = NpyWriter::writeInt32(originPath, originsData, originShape);
 
-        if (success && originSuccess) {
-                std::cout << "Successfully wrote " << leafCount << " leaf nodes to " << outputPath
-                          << " and origins to " << originPath << std::endl;
-        } else {
-                std::cerr << "Failed to write NPY files" << std::endl;
-        }
+	if (success && originSuccess) {
+		std::cout << "Successfully wrote " << leafCount << " leaf nodes to " << outputPath << " and origins to " << originPath << std::endl;
+	} else {
+		std::cerr << "Failed to write NPY files" << std::endl;
+	}
 
-        return success && originSuccess;
+	return success && originSuccess;
 }

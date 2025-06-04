@@ -17,15 +17,15 @@ __global__ void lookupCodebookKernel(const float* __restrict__ codebook,    // [
 	if (x >= width || y >= height || z >= depth || b >= batch_size) return;
 
 	// Get index from indices tensor
-	int flat_pos = b * (depth * height * width) + z * (height * width) + y * width + x;
-	uint16_t index = indices[flat_pos];
+	const int flat_pos = b * (depth * height * width) + z * (height * width) + y * width + x;
+	const uint16_t index = indices[flat_pos];
 
 	// Bounds check
 	if (index >= num_embeddings) return;
 
 	// Copy embedding vector to output
         for (int d = 0; d < embedding_dim; d++) {
-                float val = codebook[index * embedding_dim + d];
+		const float val = codebook[index * embedding_dim + d];
                 // Output in BCHWD format
                 output[b * (embedding_dim * depth * height * width) + d * (depth * height * width) + z * (height * width) + y * width + x] = val;
         }

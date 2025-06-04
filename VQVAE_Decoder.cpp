@@ -19,12 +19,12 @@
 // Host function to launch lookup kernel
 void lookupCodebook(const torch::Tensor& codebook, const torch::Tensor& indices, torch::Tensor& output) {
 	// Get tensor shapes and sizes
-	int batch_size = indices.size(0);
-	int depth = indices.size(1);
-	int height = indices.size(2);
-	int width = indices.size(3);
-	int embedding_dim = codebook.size(1);
-	int num_embeddings = codebook.size(0);
+	const int batch_size = indices.size(0);
+	const int depth = indices.size(1);
+	const int height = indices.size(2);
+	const int width = indices.size(3);
+	const int embedding_dim = codebook.size(1);
+	const int num_embeddings = codebook.size(0);
 
 	// Get raw pointers to tensor data
 	const float* codebook_ptr = codebook.data_ptr<float>();
@@ -50,13 +50,13 @@ void lookupCodebook(const torch::Tensor& codebook, const torch::Tensor& indices,
 
 // Header for compressed VDB index file
 struct CompressedHeader {
-        char magic[5];                // "VQVDB"
-        uint8_t version;              // Version number
-        uint32_t numEmbeddings;       // Number of codebook entries
-        uint8_t numDimensions;        // Number of dimensions in the index tensor (typically 3 for [d,h,w])
-        std::vector<uint16_t> shape;  // Shape of each index tensor
-        uint32_t leafCount = 0;       // Number of leaf nodes (optional)
-        std::vector<openvdb::Coord> origins;  // Leaf origins if present
+	char magic[5];                        // "VQVDB"
+	uint8_t version;                      // Version number
+	uint32_t numEmbeddings;               // Number of codebook entries
+	uint8_t numDimensions;                // Number of dimensions in the index tensor (typically 3 for [d,h,w])
+	std::vector<uint16_t> shape;          // Shape of each index tensor
+	uint32_t leafCount = 0;               // Number of leaf nodes (optional)
+	std::vector<openvdb::Coord> origins;  // Leaf origins if present
 };
 
 // Read compressed indices from file
@@ -74,10 +74,10 @@ std::vector<torch::Tensor> readCompressedIndices(const std::string& filename, Co
 	}
 
 	// Read version
-        file.read(reinterpret_cast<char*>(&header.version), 1);
-        if (header.version != 1 && header.version != 2) {
-                throw std::runtime_error("Unsupported file version");
-        }
+	file.read(reinterpret_cast<char*>(&header.version), 1);
+	if (header.version != 1 && header.version != 2) {
+		throw std::runtime_error("Unsupported file version");
+	}
 
 	// Read number of embeddings
 	file.read(reinterpret_cast<char*>(&header.numEmbeddings), sizeof(uint32_t));
@@ -85,15 +85,15 @@ std::vector<torch::Tensor> readCompressedIndices(const std::string& filename, Co
 	// Read number of dimensions
 	file.read(reinterpret_cast<char*>(&header.numDimensions), 1);
 
-        // Read shape dimensions
-        header.shape.resize(header.numDimensions);
-        file.read(reinterpret_cast<char*>(header.shape.data()), header.numDimensions * sizeof(uint16_t));
+	// Read shape dimensions
+	header.shape.resize(header.numDimensions);
+	file.read(reinterpret_cast<char*>(header.shape.data()), header.numDimensions * sizeof(uint16_t));
 
-        if (header.version >= 2) {
-                file.read(reinterpret_cast<char*>(&header.leafCount), sizeof(uint32_t));
-                header.origins.resize(header.leafCount);
-                file.read(reinterpret_cast<char*>(header.origins.data()), header.leafCount * sizeof(openvdb::Coord));
-        }
+	if (header.version >= 2) {
+		file.read(reinterpret_cast<char*>(&header.leafCount), sizeof(uint32_t));
+		header.origins.resize(header.leafCount);
+		file.read(reinterpret_cast<char*>(header.origins.data()), header.leafCount * sizeof(openvdb::Coord));
+	}
 
 	// Calculate bits needed per index
 	// (matches the Python bit_length implementation used when writing)
@@ -154,13 +154,13 @@ void writeVoxelsToGrid(typename GridType::Ptr grid, const std::vector<openvdb::C
 	using ValueT = typename GridType::ValueType;
 
 	// Ensure tensor is on CPU and convert to correct data type
-	auto cpu_data = voxelData.to(torch::kCPU);
-	auto cpu_data_float = cpu_data.to(torch::kFloat32);
+	const at::Tensor cpu_data = voxelData.to(torch::kCPU);
+	const at::Tensor cpu_data_float = cpu_data.to(torch::kFloat32);
 
-	int batch_size = cpu_data.size(0);
-	int depth = cpu_data.size(2);
-	int height = cpu_data.size(3);
-	int width = cpu_data.size(4);
+	const int batch_size = cpu_data.size(0);
+	const int depth = cpu_data.size(2);
+	const int height = cpu_data.size(3);
+	const int width = cpu_data.size(4);
 
 	openvdb::tree::ValueAccessor<openvdb::FloatTree> acc(grid->tree());
 	// For each leaf
@@ -186,23 +186,16 @@ void writeVoxelsToGrid(typename GridType::Ptr grid, const std::vector<openvdb::C
 // Main decoder class
 class VQVAEDecoder {
    public:
-	VQVAEDecoder(const std::string& model_path) : device_(torch::kCUDA) {
+	explicit VQVAEDecoder(const std::string& model_path) : device_(torch::kCUDA) {
 		try {
 			// Load the TorchScript model
 			model_ = torch::jit::load(model_path);
 			model_.eval();
 
-			/*// Move model to GPU if available
-			if (torch::jit::cuda::is_available()) {
-			    model_.to(torch::kCUDA);
-			    device_ = torch::kCUDA;
-			    std::cout << "Using CUDA device for decoding" << std::endl;
-			} else {
-			}
-			*/
-			std::cout << "Using CPU for decoding (CUDA not available)" << std::endl;
+			model_.to(torch::kCUDA);
+			device_ = torch::kCUDA;
+			std::cout << "Using CUDA device for decoding" << std::endl;
 
-			// Extract codebook from the model
 			extractCodebook();
 
 		} catch (const c10::Error& e) {
@@ -245,10 +238,6 @@ class VQVAEDecoder {
 		std::vector<torch::jit::IValue> inputs;
 		inputs.push_back(embeddings);
 
-		const auto func = model_.get_methods();
-		for (const auto& input : func) {
-			std::printf("%s", input.name().c_str());
-		}
 
 		// Use the decode method from the TorchScript model
 		torch::Tensor output;
@@ -281,12 +270,11 @@ class VQVAEDecoder {
 		return output;
 	}
 
-        template <typename GridType>
-        void decodeToGrid(const std::string& compressed_file,
-                          typename GridType::Ptr output_grid, int batch_size = 64) {
-                // Read compressed indices (also loads leaf origins if present)
-                CompressedHeader header;
-                std::vector<torch::Tensor> all_indices = readCompressedIndices(compressed_file, header);
+	template <typename GridType>
+	void decodeToGrid(const std::string& compressed_file, typename GridType::Ptr output_grid, int batch_size = 64) {
+		// Read compressed indices (also loads leaf origins if present)
+		CompressedHeader header;
+		std::vector<torch::Tensor> all_indices = readCompressedIndices(compressed_file, header);
 
 		// Process each batch of indices
 		int total_leaves = 0;
@@ -297,13 +285,13 @@ class VQVAEDecoder {
 			torch::Tensor voxels = decodeIndices(indices);
 
 			// Write voxels to grid
-                        int batch_idx_offset = total_leaves;
-                        writeVoxelsToGrid<GridType>(
-                            output_grid,
-                            std::vector<openvdb::Coord>(
-                                header.origins.begin() + batch_idx_offset,
-                                header.origins.begin() + std::min<size_t>(batch_idx_offset + indices.size(0), header.origins.size())),
-                            voxels);
+			int batch_idx_offset = total_leaves;
+			writeVoxelsToGrid<GridType>(
+			    output_grid,
+			    std::vector<openvdb::Coord>(
+			        header.origins.begin() + batch_idx_offset,
+			        header.origins.begin() + std::min<size_t>(batch_idx_offset + indices.size(0), header.origins.size())),
+			    voxels);
 
 			total_leaves += indices.size(0);
 		}
@@ -325,12 +313,11 @@ class VQVAEDecoder {
 
 
 int main(int argc, char** argv) {
-        if (argc < 5) {
-                std::cout << "Usage: " << argv[0]
-                          << " <model.pt> <compressed_indices.vqvdb> <input_template.vdb> <output.vdb> [grid_name]"
-                          << std::endl;
-                return 1;
-        }
+	if (argc < 5) {
+		std::cout << "Usage: " << argv[0] << " <model.pt> <compressed_indices.vqvdb> <input_template.vdb> <output.vdb> [grid_name]"
+		          << std::endl;
+		return 1;
+	}
 
 	const std::string model_path = argv[1];
 	const std::string compressed_path = argv[2];
@@ -363,14 +350,14 @@ int main(int argc, char** argv) {
 
 		// Process based on grid type
 		if (auto float_grid = openvdb::GridBase::grid<openvdb::FloatGrid>(base_grid)) {
-                        // Create new grid for output
-                        auto output_grid = openvdb::FloatGrid::create();
-                        output_grid->setTransform(float_grid->transformPtr());
-                        output_grid->setGridClass(float_grid->getGridClass());
-                        output_grid->setName(float_grid->getName());
+			// Create new grid for output
+			auto output_grid = openvdb::FloatGrid::create();
+			output_grid->setTransform(float_grid->transformPtr());
+			output_grid->setGridClass(float_grid->getGridClass());
+			output_grid->setName(float_grid->getName());
 
-                        // Decode compressed data to grid (leaf origins are read from the .vqvdb file)
-                        decoder.decodeToGrid<openvdb::FloatGrid>(compressed_path, output_grid);
+			// Decode compressed data to grid (leaf origins are read from the .vqvdb file)
+			decoder.decodeToGrid<openvdb::FloatGrid>(compressed_path, output_grid);
 
 			// Write output grid
 			openvdb::io::File file(output_path);
