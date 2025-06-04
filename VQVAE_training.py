@@ -418,7 +418,10 @@ def main():
     else:
         print("No pre-trained model found, training from scratch.")
         model = train_model(model, train_loader, val_loader, args)
-    
+
+    scripted_model = torch.jit.script(model)
+    scripted_model.save(os.path.join(args.output_dir, "vqvae_model.pt"))
+
     # Evaluate model
     print("Evaluating model...")
     mse, psnr = evaluate_model(model, test_loader, args)

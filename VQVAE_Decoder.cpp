@@ -28,19 +28,23 @@ void lookupCodebook(const torch::Tensor& codebook, const torch::Tensor& indices,
 
 	// Get raw pointers to tensor data
 	const float* codebook_ptr = codebook.data_ptr<float>();
+
+	float* device_codebook_ptr;
+	cudaMalloc(&device_codebook_ptr, sizeof(float) * embedding_dim * num_embeddings);
+
+
 	const uint16_t* indices_ptr = reinterpret_cast<const uint16_t*>(indices.data_ptr<int>());
 	float* output_ptr = output.data_ptr<float>();
 
-        // Launch kernel via CUDA wrapper
-        lookupCodebook_launch(codebook_ptr, indices_ptr, output_ptr, batch_size, depth, height, width, embedding_dim,
-                              num_embeddings);
+	// Launch kernel via CUDA wrapper
+	lookupCodebook_launch(codebook_ptr, indices_ptr, output_ptr, batch_size, depth, height, width, embedding_dim, num_embeddings);
 
-        // Check for errors
-        cudaError_t err = cudaGetLastError();
-        if (err != cudaSuccess) {
-                std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
-                throw std::runtime_error("CUDA kernel launch failed");
-        }
+	// Check for errors
+	cudaError_t err = cudaGetLastError();
+	if (err != cudaSuccess) {
+		std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+		throw std::runtime_error("CUDA kernel launch failed");
+	}
 }
 
 
@@ -84,7 +88,9 @@ std::vector<torch::Tensor> readCompressedIndices(const std::string& filename, Co
 	file.read(reinterpret_cast<char*>(header.shape.data()), header.numDimensions * sizeof(uint16_t));
 
 	// Calculate bits needed per index
-	int bitsPerIndex = 32 - _tzcnt_u32(header.numEmbeddings - 1);
+	// (matches the Python bit_length implementation used when writing)
+	unsigned int embedding_minus_one = header.numEmbeddings - 1;
+	int bitsPerIndex = 32 - _lzcnt_u32(embedding_minus_one);
 	int bytesPerIndex = (bitsPerIndex + 7) / 8;  // Round up to bytes
 
 	// Read all batches
@@ -148,6 +154,7 @@ void writeVoxelsToGrid(typename GridType::Ptr grid, const std::vector<openvdb::C
 	int height = cpu_data.size(3);
 	int width = cpu_data.size(4);
 
+	openvdb::tree::ValueAccessor<openvdb::FloatTree> acc(grid->tree());
 	// For each leaf
 	for (int b = 0; b < batch_size && b < static_cast<int>(origins.size()); b++) {
 		openvdb::Coord origin = origins[b];
@@ -161,7 +168,7 @@ void writeVoxelsToGrid(typename GridType::Ptr grid, const std::vector<openvdb::C
 
 					// Set voxel in grid
 					openvdb::Coord xyz(origin.x() + x, origin.y() + y, origin.z() + z);
-					grid->setValue(xyz, static_cast<ValueT>(value));
+					acc.setValue(xyz, static_cast<ValueT>(value));
 				}
 			}
 		}
@@ -171,7 +178,7 @@ void writeVoxelsToGrid(typename GridType::Ptr grid, const std::vector<openvdb::C
 // Main decoder class
 class VQVAEDecoder {
    public:
-	VQVAEDecoder(const std::string& model_path) : device_(torch::kCPU) {
+	VQVAEDecoder(const std::string& model_path) : device_(torch::kCUDA) {
 		try {
 			// Load the TorchScript model
 			model_ = torch::jit::load(model_path);
@@ -185,7 +192,6 @@ class VQVAEDecoder {
 			} else {
 			}
 			*/
-			device_ = torch::kCPU;
 			std::cout << "Using CPU for decoding (CUDA not available)" << std::endl;
 
 			// Extract codebook from the model
@@ -230,6 +236,11 @@ class VQVAEDecoder {
 		// Pass through decoder
 		std::vector<torch::jit::IValue> inputs;
 		inputs.push_back(embeddings);
+
+		const auto func = model_.get_methods();
+		for (const auto& input : func) {
+			std::printf("%s", input.name().c_str());
+		}
 
 		// Use the decode method from the TorchScript model
 		torch::Tensor output;
