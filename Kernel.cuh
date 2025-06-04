@@ -2,9 +2,11 @@
 
 #include <cuda_runtime.h>
 
+
 #ifdef __cplusplus
 extern "C" {
 #endif
+
 // Declare the kernel launcher function (callable from C++)
 void lookupCodebook_launch(const float* codebook,    // [num_embeddings, embedding_dim]
                            const uint16_t* indices,  // [batch_size, depth, height, width]

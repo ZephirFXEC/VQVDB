@@ -31,23 +31,16 @@ void lookupCodebook(const torch::Tensor& codebook, const torch::Tensor& indices,
 	const uint16_t* indices_ptr = reinterpret_cast<const uint16_t*>(indices.data_ptr<int>());
 	float* output_ptr = output.data_ptr<float>();
 
-	// Define block and grid dimensions
-	dim3 block(8, 8, 4);
+        // Launch kernel via CUDA wrapper
+        lookupCodebook_launch(codebook_ptr, indices_ptr, output_ptr, batch_size, depth, height, width, embedding_dim,
+                              num_embeddings);
 
-	// We'll encode the batch dimension into the z dimension by multiplying
-	dim3 grid((width + block.x - 1) / block.x, (height + block.y - 1) / block.y,
-	          batch_size * ((depth + block.z - 1) / block.z)  // Combine batch and depth dimensions
-	);
-
-	// Launch kernel
-	lookupCodebookKernel<<<grid, block>>>(codebook_ptr, indices_ptr, output_ptr, batch_size, depth, height, width, embedding_dim,
-	                                      num_embeddings);
-	// Check for errors
-	cudaError_t err = cudaGetLastError();
-	if (err != cudaSuccess) {
-		std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
-		throw std::runtime_error("CUDA kernel launch failed");
-	}
+        // Check for errors
+        cudaError_t err = cudaGetLastError();
+        if (err != cudaSuccess) {
+                std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
+                throw std::runtime_error("CUDA kernel launch failed");
+        }
 }
 
 
