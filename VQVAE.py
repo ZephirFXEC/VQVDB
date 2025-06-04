@@ -13,30 +13,45 @@ from torch.utils.data import Dataset, DataLoader
 
 
 class VDBLeafDataset(Dataset):
-    def __init__(self, npy_files, transform=None, include_origins=False):
-        """
-        Dataset for loading multiple .npy files containing VDB leaf data
+    def __init__(self, npy_files, transform=None, include_origins=False, memory_map=True):
+        """Dataset for loading multiple .npy files containing VDB leaf data.
 
-        Args:
-            npy_files: List of .npy file paths
-            transform: Optional transform to apply to samples
+        Parameters
+        ----------
+        npy_files : list[str]
+            Paths to the input ``.npy`` files.
+        transform : callable, optional
+            Optional transform applied to each sample.
+        include_origins : bool
+            Whether to also load leaf origin coordinates.
+        memory_map : bool, default ``True``
+            If ``True`` files are opened with ``mmap_mode='r'`` and kept open
+            for the lifetime of the dataset to avoid reloading them every time
+            ``__getitem__`` is called.
         """
-        self.npy_files = npy_files
+
         self.transform = transform
         self.include_origins = include_origins
-        if include_origins:
-            self.origin_files = [str(Path(f).with_suffix("._origins.npy")) for f in npy_files]
 
-        # Load and process the shape information from all files
+        self.leaf_arrays = []
+        self.origin_arrays = []
         self.file_offsets = [0]
         self.total_leaves = 0
 
         for npy_file in npy_files:
-            data = np.load(npy_file)
-            if len(data.shape) != 4 or data.shape[1:] != (8, 8, 8):
-                raise ValueError(f"File {npy_file} has incorrect shape. Expected (N, 8, 8, 8), got {data.shape}")
-            self.total_leaves += data.shape[0]
+            arr = np.load(npy_file, mmap_mode="r" if memory_map else None)
+            if len(arr.shape) != 4 or arr.shape[1:] != (8, 8, 8):
+                raise ValueError(
+                    f"File {npy_file} has incorrect shape. Expected (N, 8, 8, 8), got {arr.shape}"
+                )
+            self.leaf_arrays.append(arr)
+            self.total_leaves += arr.shape[0]
             self.file_offsets.append(self.total_leaves)
+
+        if include_origins:
+            self.origin_files = [str(Path(f).with_suffix("._origins.npy")) for f in npy_files]
+            for origin_file in self.origin_files:
+                self.origin_arrays.append(np.load(origin_file, mmap_mode="r" if memory_map else None))
 
     def __len__(self):
         return self.total_leaves
@@ -46,14 +61,12 @@ class VDBLeafDataset(Dataset):
         file_idx = next(i for i, offset in enumerate(self.file_offsets) if offset > idx) - 1
         local_idx = idx - self.file_offsets[file_idx]
 
-        # Load data (lazy loading)
-        data = np.load(self.npy_files[file_idx])
-        leaf_data = data[local_idx].astype(np.float32)
+        # Access data from cached arrays
+        leaf_data = self.leaf_arrays[file_idx][local_idx].astype(np.float32)
 
         origin = None
         if self.include_origins:
-            origin_data = np.load(self.origin_files[file_idx])
-            origin = origin_data[local_idx].astype(np.int32)
+            origin = self.origin_arrays[file_idx][local_idx].astype(np.int32)
 
         # Convert to tensor
         leaf_tensor = torch.from_numpy(leaf_data)
