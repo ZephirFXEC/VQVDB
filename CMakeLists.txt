@@ -6,10 +6,10 @@ find_package(CUDAToolkit REQUIRED)
 find_package(Caffe2 CONFIG REQUIRED)
 find_package(Torch CONFIG REQUIRED)
 
-set(CUDA_ATTACH_VS_BUILD_RULE_TO_CUDA_FILE OFF)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-
-# Set vars
+# Set vars for OpenVDB
 if (UNIX)
     set(openvdb_lib "$ENV{HFS}/dsolib/libopenvdb_sesi.so")
 endif ()
@@ -19,26 +19,38 @@ if (WIN32)
 endif ()
 
 # ------- Find Houdini --------
-# Points CMake to $HFS/toolkit/cmake
 list(APPEND CMAKE_PREFIX_PATH "$ENV{HFS}/toolkit/cmake")
 find_package(Houdini REQUIRED)
 
-# Ccreate an interface library capturing Houdini & openvdb_sesi
+# Create an interface library for Houdini & OpenVDB
 add_library(HoudiniVDB INTERFACE)
 target_link_libraries(HoudiniVDB INTERFACE Houdini ${openvdb_lib})
 target_include_directories(HoudiniVDB INTERFACE
         $ENV{HFS}/toolkit/include
 )
 
-
-add_library(kernels Kernel.cu)
-target_link_libraries(kernels CUDA::cudart)
-
-add_executable(VQVDB
-        LeafExtractor.cpp
-        LeafExtractor.hpp
-        VQVAE_Decoder.cpp)
-
-target_link_libraries(VQVDB HoudiniVDB torch protobuf::libprotobuf kernels)
-
+# Add LibTorch to path
 list(APPEND CMAKE_PREFIX_PATH "libtorch")
+
+# Add CUDA kernel library
+add_library(kernels STATIC Kernel.cu)
+target_link_libraries(kernels PUBLIC CUDA::cudart)
+set_target_properties(kernels PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        POSITION_INDEPENDENT_CODE ON
+)
+
+# Add leaf extractor executable
+add_executable(leafextractor
+        LeafExtractor.cpp
+        LeafExtractor.hpp)
+target_link_libraries(leafextractor PRIVATE HoudiniVDB)
+
+# Add decoder executable
+add_executable(vqvdb_decoder VQVAE_Decoder.cpp)
+target_include_directories(vqvdb_decoder PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(vqvdb_decoder PRIVATE
+        HoudiniVDB
+        ${TORCH_LIBRARIES}
+        kernels
+)

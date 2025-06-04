@@ -12,15 +12,12 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
-#include <span>
 #include <vector>
 
+#include "Kernel.cuh"
+
 // Host function to launch lookup kernel
-void lookupCodebook(
-	const torch::Tensor& codebook,
-	const torch::Tensor& indices,
-	torch::Tensor& output
-) {
+void lookupCodebook(const torch::Tensor& codebook, const torch::Tensor& indices, torch::Tensor& output) {
 	// Get tensor shapes and sizes
 	int batch_size = indices.size(0);
 	int depth = indices.size(1);
@@ -36,23 +33,15 @@ void lookupCodebook(
 
 	// Define block and grid dimensions
 	dim3 block(8, 8, 4);
-	dim3 grid((width + block.x - 1) / block.x,
-			 (height + block.y - 1) / block.y,
-			 (depth + block.z - 1) / block.z)
 
-	// Launch kernel
-	lookupCodebookKernel<<<grid, block>>>(
-		codebook_ptr,
-		indices_ptr,
-		output_ptr,
-		batch_size,
-		depth,
-		height,
-		width,
-		embedding_dim,
-		num_embeddings
+	// We'll encode the batch dimension into the z dimension by multiplying
+	dim3 grid((width + block.x - 1) / block.x, (height + block.y - 1) / block.y,
+	          batch_size * ((depth + block.z - 1) / block.z)  // Combine batch and depth dimensions
 	);
 
+	// Launch kernel
+	lookupCodebookKernel<<<grid, block>>>(codebook_ptr, indices_ptr, output_ptr, batch_size, depth, height, width, embedding_dim,
+	                                      num_embeddings);
 	// Check for errors
 	cudaError_t err = cudaGetLastError();
 	if (err != cudaSuccess) {
@@ -102,7 +91,7 @@ std::vector<torch::Tensor> readCompressedIndices(const std::string& filename, Co
 	file.read(reinterpret_cast<char*>(header.shape.data()), header.numDimensions * sizeof(uint16_t));
 
 	// Calculate bits needed per index
-	int bitsPerIndex = 32 - __builtin_clz(header.numEmbeddings - 1);
+	int bitsPerIndex = 32 - _tzcnt_u32(header.numEmbeddings - 1);
 	int bytesPerIndex = (bitsPerIndex + 7) / 8;  // Round up to bytes
 
 	// Read all batches
@@ -189,21 +178,22 @@ void writeVoxelsToGrid(typename GridType::Ptr grid, const std::vector<openvdb::C
 // Main decoder class
 class VQVAEDecoder {
    public:
-	VQVAEDecoder(const std::string& model_path) {
+	VQVAEDecoder(const std::string& model_path) : device_(torch::kCPU) {
 		try {
 			// Load the TorchScript model
 			model_ = torch::jit::load(model_path);
 			model_.eval();
 
-			// Move model to GPU if available
-			if (torch::cuda::is_available()) {
-				model_.to(torch::kCUDA);
-				device_ = torch::kCUDA;
-				std::cout << "Using CUDA device for decoding" << std::endl;
+			/*// Move model to GPU if available
+			if (torch::jit::cuda::is_available()) {
+			    model_.to(torch::kCUDA);
+			    device_ = torch::kCUDA;
+			    std::cout << "Using CUDA device for decoding" << std::endl;
 			} else {
-				device_ = torch::kCPU;
-				std::cout << "Using CPU for decoding (CUDA not available)" << std::endl;
 			}
+			*/
+			device_ = torch::kCPU;
+			std::cout << "Using CPU for decoding (CUDA not available)" << std::endl;
 
 			// Extract codebook from the model
 			extractCodebook();

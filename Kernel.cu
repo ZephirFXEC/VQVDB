@@ -1,13 +1,17 @@
-#include <cuda_runtime.h>
+#include "Kernel.cuh"
 __global__ void lookupCodebookKernel(const float* __restrict__ codebook,    // [num_embeddings, embedding_dim]
-									 const uint16_t* __restrict__ indices,  // [batch_size, depth, height, width]
-									 float* __restrict__ output,            // [batch_size, embedding_dim, depth, height, width]
-									 int batch_size, int depth, int height, int width, int embedding_dim, int num_embeddings) {
+                                     const uint16_t* __restrict__ indices,  // [batch_size, depth, height, width]
+                                     float* __restrict__ output,            // [batch_size, embedding_dim, depth, height, width]
+                                     int batch_size, int depth, int height, int width, int embedding_dim, int num_embeddings) {
 	// Calculate global thread indices
 	int x = blockIdx.x * blockDim.x + threadIdx.x;
 	int y = blockIdx.y * blockDim.y + threadIdx.y;
 	int z = blockIdx.z * blockDim.z + threadIdx.z;
-	int b = blockIdx.w;  // Batch index
+
+	// Calculate batch index from blockIdx.z
+	int b = blockIdx.z / ((depth + blockDim.z - 1) / blockDim.z);
+	// Adjust z to be local to the current batch
+	z = z % depth;
 
 	if (x >= width || y >= height || z >= depth || b >= batch_size) return;
 
@@ -25,4 +29,3 @@ __global__ void lookupCodebookKernel(const float* __restrict__ codebook,    // [
 		output[b * (embedding_dim * depth * height * width) + d * (depth * height * width) + z * (height * width) + y * width + x] = val;
 	}
 }
-
