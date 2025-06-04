@@ -3,6 +3,9 @@ project(VQVDB LANGUAGES CUDA CXX)
 
 # ------- Find CUDA -----------
 find_package(CUDAToolkit REQUIRED)
+find_package(Caffe2 CONFIG REQUIRED)
+find_package(Torch CONFIG REQUIRED)
+
 set(CUDA_ATTACH_VS_BUILD_RULE_TO_CUDA_FILE OFF)
 
 
@@ -27,8 +30,15 @@ target_include_directories(HoudiniVDB INTERFACE
         $ENV{HFS}/toolkit/include
 )
 
+
+add_library(kernels Kernel.cu)
+target_link_libraries(kernels CUDA::cudart)
+
 add_executable(VQVDB
         LeafExtractor.cpp
-        LeafExtractor.hpp)
+        LeafExtractor.hpp
+        VQVAE_Decoder.cpp)
 
-target_link_libraries(VQVDB HoudiniVDB)
+target_link_libraries(VQVDB HoudiniVDB torch protobuf::libprotobuf kernels)
+
+list(APPEND CMAKE_PREFIX_PATH "libtorch")

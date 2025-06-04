@@ -353,7 +353,7 @@ def main():
     parser.add_argument("--learning_rate", type=float, default=1e-4, help="Learning rate")
     parser.add_argument("--epochs", type=int, default=100, help="Number of epochs")
     parser.add_argument("--num_embeddings", type=int, default=256, help="Size of codebook")
-    parser.add_argument("--embedding_dim", type=int, default=16, help="Dimension of codebook vectors")
+    parser.add_argument("--embedding_dim", type=int, default=64, help="Dimension of codebook vectors")
     parser.add_argument("--hidden_dims", type=int, default=128, help="Hidden dimensions in model")
     parser.add_argument("--commitment_cost", type=float, default=0.25, help="Commitment cost for VQ")
     parser.add_argument("--device", type=str, default="cuda", help="Device (cuda or cpu)")
@@ -407,18 +407,9 @@ def main():
         f"Codebook size: {args.num_embeddings} x {args.embedding_dim} = {args.num_embeddings * args.embedding_dim:,} parameters")
 
     # Train model
-    # print("Starting training...")
-    # model = train_model(model, train_loader, val_loader, args)
-    
-    #load pre-trained model if available
-    model_path = os.path.join(args.output_dir, "best_model.pt")
-    if os.path.exists(model_path):
-        print(f"Loading pre-trained model from {model_path}")
-        model.load_state_dict(torch.load(model_path))
-    else:
-        print("No pre-trained model found, training from scratch.")
-        model = train_model(model, train_loader, val_loader, args)
-    
+    print("Starting training...")
+    model = train_model(model, train_loader, val_loader, args)
+
     # Evaluate model
     print("Evaluating model...")
     mse, psnr = evaluate_model(model, test_loader, args)
