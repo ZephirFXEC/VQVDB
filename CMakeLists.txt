@@ -1,13 +1,18 @@
-cmake_minimum_required(VERSION 3.31)
+cmake_minimum_required(VERSION 3.28)
 project(VQVDB LANGUAGES CUDA CXX)
 
+set(USE_CUDNN 1)
 # ------- Find CUDA -----------
 find_package(CUDAToolkit REQUIRED)
-find_package(Caffe2 CONFIG REQUIRED)
 find_package(Torch CONFIG REQUIRED)
+find_package(Python3 COMPONENTS Development REQUIRED)
+find_package(pybind11 CONFIG)
+find_package(TBB CONFIG REQUIRED)
+
 
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
 
 # Set vars for OpenVDB
 if (UNIX)
@@ -54,3 +59,11 @@ target_link_libraries(vqvdb_decoder PRIVATE
         ${TORCH_LIBRARIES}
         kernels
 )
+
+pybind11_add_module(
+        vdb_leaf_extractor  # Module name
+        cpp_extractor.cpp       # Source file
+)
+
+# Link against OpenVDB
+target_link_libraries(vdb_leaf_extractor PRIVATE HoudiniVDB TBB::tbb)
