@@ -15,9 +15,12 @@ project_root = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, project_root)
 
 try:
-    from pyVDB import *
-except ImportError:
-    print("Error: Could not import 'vdb_leaf_extractor'.")
+    # We now import the module from WITHIN the pyVDB package
+    from pyVDB import vdb_leaf_extractor
+except ImportError as e:
+    print("Error: Could not import 'vdb_leaf_extractor' from the 'pyVDB' package.")
+    print(f"Original error: {e}")
+    print("Please ensure the compiled .so/.pyd file is inside the 'pyVDB' directory.")
     sys.exit(1)
 
 LEAF_DIM = 8
@@ -267,9 +270,9 @@ if __name__ == "__main__":
     parser_train.add_argument("--data_dir", type=str, default="data", help="Directory with .vdb files.")
     parser_train.add_argument("--grid_name", type=str, default="density", help="Name of the grid to extract.")
     parser_train.add_argument("--epochs", type=int, default=10, help="Number of training epochs.")
-    parser_train.add_argument("--batch_size", type=int, default=64, help="Training batch size.")
+    parser_train.add_argument("--batch_size", type=int, default=4096, help="Training batch size.")
     parser_train.add_argument("--lr", type=float, default=1e-3, help="Learning rate.")
-    parser_train.add_argument("--num_embeddings", type=int, default=1024, help="Size of the codebook.")
+    parser_train.add_argument("--num_embeddings", type=int, default=512, help="Size of the codebook.")
     parser_train.add_argument("--embedding_dim", type=int, default=64, help="Dimension of the latent vectors.")
     parser_train.add_argument("--model_path", type=str, default="models/vqvae.pth",
                               help="Path to save the trained model.")

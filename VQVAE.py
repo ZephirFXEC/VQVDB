@@ -3,6 +3,7 @@ import os
 import struct
 import time
 from pathlib import Path
+from typing import List, Optional, Callable, Sequence
 
 import numpy as np
 import torch
@@ -13,75 +14,87 @@ from torch.utils.data import Dataset, DataLoader
 
 
 class VDBLeafDataset(Dataset):
-    def __init__(self, npy_files, transform=None, include_origins=False, memory_map=True):
-        """Dataset for loading multiple .npy files containing VDB leaf data.
+    """
+    Efficient dataset for OpenVDB-leaf tensors stored one file per grid.
 
-        Parameters
-        ----------
-        npy_files : list[str]
-            Paths to the input ``.npy`` files.
-        transform : callable, optional
-            Optional transform applied to each sample.
-        include_origins : bool
-            Whether to also load leaf origin coordinates.
-        memory_map : bool, default ``True``
-            If ``True`` files are opened with ``mmap_mode='r'`` and kept open
-            for the lifetime of the dataset to avoid reloading them every time
-            ``__getitem__`` is called.
-        """
+    *   Each ``.npy`` file is **memory-mapped once** and kept for the
+        lifetime of the process – no repeated `np.load` in ``__getitem__``.
+    *   Global-index → (file, local-index) lookup is done in vectorised C
+        via `np.searchsorted`.
+    *   Supports an optional companion ``_origins.npy`` file **per leaf file**
+        that stores the integer (x, y, z) origins for later embedding.
+    """
+
+    def __init__(
+            self,
+            npy_files: Sequence[str | Path],
+            transform: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
+            *,
+            include_origins: bool = False,
+            origins_root: str | Path | None = None,  # <<< NEW
+            origins_suffix: str = "._origins.npy",  # <<< configurable
+    ) -> None:
+        super().__init__()
 
         self.transform = transform
         self.include_origins = include_origins
 
-        self.leaf_arrays = []
-        self.origin_arrays = []
-        self.file_offsets = [0]
-        self.total_leaves = 0
+        # --- mmap all data files -------------------------------------------------
+        self.arrays: List[np.memmap] = []
+        self.origin_arrays: List[np.memmap] | None = [] if include_origins else None
 
-        for npy_file in npy_files:
-            arr = np.load(npy_file, mmap_mode="r" if memory_map else None)
-            if len(arr.shape) != 4 or arr.shape[1:] != (8, 8, 8):
-                raise ValueError(
-                    f"File {npy_file} has incorrect shape. Expected (N, 8, 8, 8), got {arr.shape}"
-                )
-            self.leaf_arrays.append(arr)
-            self.total_leaves += arr.shape[0]
-            self.file_offsets.append(self.total_leaves)
+        for f in npy_files:
+            arr = np.load(f, mmap_mode="r")
+            if arr.shape[1:] != (32, 32, 32):
+                raise ValueError(f"{f}: expected (N, 32, 32, 32), got {arr.shape}")
+            self.arrays.append(arr)
 
-        if include_origins:
-            self.origin_files = [str(Path(f).with_suffix("._origins.npy")) for f in npy_files]
-            for origin_file in self.origin_files:
-                self.origin_arrays.append(np.load(origin_file, mmap_mode="r" if memory_map else None))
+            if include_origins:
+                # Let the caller override where origins live -----------------
+                if origins_root is not None:
+                    origin_path = Path(origins_root) / (Path(f).stem + origins_suffix)
+                else:
+                    origin_path = Path(f).with_suffix(origins_suffix)
+                if not origin_path.exists():
+                    raise FileNotFoundError(origin_path)
 
-    def __len__(self):
+                self.origin_arrays.append(np.load(origin_path, mmap_mode="r"))
+
+        # --- pre-compute global index mapping ------------------------------------
+        lengths = np.fromiter((a.shape[0] for a in self.arrays), dtype=np.int64)
+        self.file_offsets = np.concatenate(([0], np.cumsum(lengths)))
+        self.total_leaves: int = int(self.file_offsets[-1])
+
+    # ---------------------------------------------------------------------------
+
+    def __len__(self) -> int:
         return self.total_leaves
 
-    def __getitem__(self, idx):
-        # Find which file this index belongs to
-        file_idx = next(i for i, offset in enumerate(self.file_offsets) if offset > idx) - 1
-        local_idx = idx - self.file_offsets[file_idx]
+    def __getitem__(self, idx: int):
+        if not (0 <= idx < self.total_leaves):
+            raise IndexError(idx)
 
-        # Access data from cached arrays
-        leaf_data = self.leaf_arrays[file_idx][local_idx].astype(np.float32)
+        # locate (file, local) in O(log n) inside highly-optimised C code
+        file_idx = int(np.searchsorted(self.file_offsets, idx, side="right") - 1)
+        local_idx = idx - int(self.file_offsets[file_idx])
 
-        origin = None
-        if self.include_origins:
-            origin = self.origin_arrays[file_idx][local_idx].astype(np.int32)
+        # zero-copy view from the mmap’d array
+        leaf_np = self.arrays[file_idx][local_idx].astype(np.float32, copy=True)
+        leaf = torch.from_numpy(leaf_np).to(torch.float32).unsqueeze(0)
 
-        # Convert to tensor
-        leaf_tensor = torch.from_numpy(leaf_data)
-
-        # Apply any transforms
-        if self.transform:
-            leaf_tensor = self.transform(leaf_tensor)
+        if self.transform is not None:
+            leaf = self.transform(leaf)
 
         if self.include_origins:
-            return leaf_tensor.unsqueeze(0), origin
-        return leaf_tensor.unsqueeze(0)  # Add channel dimension: [1, 8, 8, 8]
+            origin_np = self.origin_arrays[file_idx][local_idx].astype(np.int32, copy=False)
+            origin = torch.from_numpy(origin_np)
+            return leaf, origin
+
+        return leaf
 
 
 class ResidualBlock(nn.Module):
-    def __init__(self, channels):
+    def __init__(self, channels): 
         super().__init__()
         self.conv1 = nn.Conv3d(channels, channels, kernel_size=3, padding=1)
         self.conv2 = nn.Conv3d(channels, channels, kernel_size=3, padding=1)
@@ -147,10 +160,13 @@ class VQVAE(nn.Module):
 
         # Encoder
         self.encoder = nn.Sequential(
-            nn.Conv3d(1, hidden_dims // 2, kernel_size=4, stride=2, padding=1),  # 8x8x8 -> 4x4x4
+            nn.Conv3d(1, hidden_dims // 4, kernel_size=4, stride=2, padding=1),  # 32x32x32 -> 16x16x16
             nn.ReLU(),
-            nn.Conv3d(hidden_dims // 2, hidden_dims, kernel_size=4, stride=2, padding=1),  # 4x4x4 -> 2x2x2
+            nn.Conv3d(hidden_dims // 4, hidden_dims // 2, kernel_size=4, stride=2, padding=1),  # 16x16x16 -> 8x8x8
             nn.ReLU(),
+            nn.Conv3d(hidden_dims // 2, hidden_dims, kernel_size=4, stride=2, padding=1),  # 8x8x8 -> 4x4x4
+            nn.ReLU(),
+            ResidualBlock(hidden_dims),
             ResidualBlock(hidden_dims),
             nn.Conv3d(hidden_dims, embedding_dim, kernel_size=1)  # Projection to embedding dimension
         )
@@ -159,12 +175,17 @@ class VQVAE(nn.Module):
         self.vq = VectorQuantizer(num_embeddings, embedding_dim, commitment_cost)
 
         # Decoder
+        # Decoder for reconstructing 32x32x32 blocks from 4x4x4 latent grid
         self.decoder = nn.Sequential(
             nn.Conv3d(embedding_dim, hidden_dims, kernel_size=1),
             ResidualBlock(hidden_dims),
-            nn.ConvTranspose3d(hidden_dims, hidden_dims // 2, kernel_size=4, stride=2, padding=1),  # 2x2x2 -> 4x4x4
+            ResidualBlock(hidden_dims),
+            nn.ConvTranspose3d(hidden_dims, hidden_dims // 2, kernel_size=4, stride=2, padding=1),  # 4x4x4 -> 8x8x8
             nn.ReLU(),
-            nn.ConvTranspose3d(hidden_dims // 2, 1, kernel_size=4, stride=2, padding=1),  # 4x4x4 -> 8x8x8
+            nn.ConvTranspose3d(hidden_dims // 2, hidden_dims // 4, kernel_size=4, stride=2, padding=1),
+            # 8x8x8 -> 16x16x16
+            nn.ReLU(),
+            nn.ConvTranspose3d(hidden_dims // 4, 1, kernel_size=4, stride=2, padding=1),  # 16x16x16 -> 32x32x32
         )
 
     def encode(self, x):
@@ -196,6 +217,11 @@ def train_model(model, train_loader, val_loader, args):
     device = torch.device(args.device)
     model = model.to(device)
 
+    if args.device == 'cuda':
+        torch.backends.cudnn.benchmark = True
+
+    scaler = torch.amp.GradScaler(enabled=(args.device == 'cuda'))
+
     best_val_loss = float('inf')
 
     for epoch in range(args.epochs):
@@ -209,14 +235,16 @@ def train_model(model, train_loader, val_loader, args):
         for batch in train_loader:
             optimizer.zero_grad()
 
-            x = batch.to(device)
-            x_recon, vq_loss, _ = model(x)
+            x = batch.to(device, non_blocking=True)
 
-            recon_error = F.mse_loss(x_recon, x)
-            loss = recon_error + vq_loss
+            with torch.amp.autocast(enabled=(args.device == 'cuda'), device_type='cuda'):
+                x_recon, vq_loss, _ = model(x)
+                recon_error = F.mse_loss(x_recon, x)
+                loss = recon_error + vq_loss
 
-            loss.backward()
-            optimizer.step()
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
             train_loss += loss.item()
             recon_loss += recon_error.item()
@@ -235,12 +263,13 @@ def train_model(model, train_loader, val_loader, args):
 
         with torch.no_grad():
             for batch in val_loader:
-                x = batch.to(device)
-                x_recon, vq_loss, _ = model(x)
-
-                recon_error = F.mse_loss(x_recon, x)
-                loss = recon_error + vq_loss
-
+                
+                x = batch.to(device, non_blocking=True)
+                with torch.amp.autocast(enabled=(args.device == 'cuda'), device_type='cuda'):
+                    x_recon, vq_loss, _ = model(x)
+                    recon_error = F.mse_loss(x_recon, x)
+                    loss = recon_error + vq_loss
+                    
                 val_loss += loss.item()
                 val_recon_loss += recon_error.item()
                 val_latent_loss += vq_loss.item()
@@ -294,7 +323,7 @@ def evaluate_model(model, test_loader, args):
 
     with torch.no_grad():
         for batch in test_loader:
-            x = batch.to(device)
+            x = (batch[0] if isinstance(batch, (list, tuple)) else batch).to(device, non_blocking=True)
             x_recon, _, _ = model(x)
 
             mse = F.mse_loss(x_recon, x, reduction='none').mean((1, 2, 3, 4))
@@ -376,7 +405,7 @@ def compress_dataset(model, data_loader, output_file, args, origins=None):
     print(f"Compressed indices saved to {output_file}")
 
     # Calculate and print compression ratio
-    num_voxels = np.prod([8, 8, 8])  # Each leaf is 8x8x8
+    num_voxels = np.prod([32, 32, 32])  # Each leaf is 32x32x32
     original_bytes = num_voxels * 4  # 4 bytes per float32 voxel
     compressed_bytes = np.prod(index_shape) * bytes_per_index
     compression_ratio = original_bytes / compressed_bytes
@@ -387,22 +416,49 @@ def compress_dataset(model, data_loader, output_file, args, origins=None):
     return compression_ratio
 
 
+def concatenate_origins(file_list, origins_dir):
+    """Concatenate per-grid origins so order matches the dataset."""
+    # --- FIX ---
+    # If the input list is empty, return an empty numpy array of the correct shape.
+    if not file_list:
+        # Origins are (N, 3) for (x, y, z), so the shape is (0, 3).
+        return np.empty((0, 3), dtype=np.int32)
+    # -----------
+
+    arrays = []
+    for f in file_list:
+        path = Path(origins_dir) / (Path(f).stem + "._origins.npy")
+        if not path.exists():
+            # Make it more robust by warning the user if a file is missing
+            print(f"Warning: Origin file not found and will be skipped: {path}")
+            continue
+        arrays.append(np.load(path))
+
+    # Also handle the case where files existed but couldn't be loaded
+    if not arrays:
+        return np.empty((0, 3), dtype=np.int32)
+
+    return np.concatenate(arrays, axis=0).astype(np.int32)
+
 def main():
     parser = argparse.ArgumentParser(description="Train VQ-VAE for OpenVDB leaf compression")
     parser.add_argument("--input_dir", type=str, required=True, help="Directory containing .npy files")
     parser.add_argument("--output_dir", type=str, required=True, help="Directory to save outputs")
-    parser.add_argument("--batch_size", type=int, default=64, help="Batch size")
+    parser.add_argument("--batch_size", type=int, default=2048, help="Batch size")
     parser.add_argument("--learning_rate", type=float, default=1e-4, help="Learning rate")
     parser.add_argument("--epochs", type=int, default=100, help="Number of epochs")
-    parser.add_argument("--num_embeddings", type=int, default=256, help="Size of codebook")
-    parser.add_argument("--embedding_dim", type=int, default=32, help="Dimension of codebook vectors")
+    parser.add_argument("--num_embeddings", type=int, default=512, help="Size of codebook")
+    parser.add_argument("--embedding_dim", type=int, default=64, help="Dimension of codebook vectors")
     parser.add_argument("--hidden_dims", type=int, default=128, help="Hidden dimensions in model")
     parser.add_argument("--commitment_cost", type=float, default=0.25, help="Commitment cost for VQ")
     parser.add_argument("--device", type=str, default="cuda", help="Device (cuda or cpu)")
     parser.add_argument("--val_split", type=float, default=0.1, help="Validation split ratio")
     parser.add_argument("--test_split", type=float, default=0.1, help="Test split ratio")
-    parser.add_argument("--origins_file", type=str, default=None,
+    parser.add_argument("--origins_dir", type=str, default=None,
                         help="Optional NPY file containing leaf origins to embed in the .vqvdb output")
+    parser.add_argument("--compress_file", type=str, default=None,
+                        help="Path to a single .npy grid you want to compress "
+                             "(overrides the normal test-set compression)")
     args = parser.parse_args()
 
     # Create output directory
@@ -427,14 +483,29 @@ def main():
 
     print(f"Train files: {len(train_files)}, Val files: {len(val_files)}, Test files: {len(test_files)}")
 
-    # Create datasets and dataloaders
-    train_dataset = VDBLeafDataset(train_files)
-    val_dataset = VDBLeafDataset(val_files)
-    test_dataset = VDBLeafDataset(test_files, include_origins=args.origins_file is not None)
+    train_dataset = VDBLeafDataset(
+        train_files,
+        include_origins=False,  # <<<
+    )
 
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True)
-    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True)
-    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True)
+    val_dataset = VDBLeafDataset(
+        val_files,
+        include_origins=False,  # <<<
+    )
+
+    test_dataset = VDBLeafDataset(
+        test_files,
+        include_origins=False,  # keep origins for later embedding
+    )
+
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=6, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=2, pin_memory=True)
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=2, pin_memory=True)
+
+    if args.origins_dir:
+        origins = concatenate_origins(test_files, args.origins_dir)
+    else:
+        origins = None
 
     # Create model
     model = VQVAE(
@@ -451,23 +522,63 @@ def main():
         f"Codebook size: {args.num_embeddings} x {args.embedding_dim} = {args.num_embeddings * args.embedding_dim:,} parameters")
 
     # Train model
-    print("Starting training...")
-    model = train_model(model, train_loader, val_loader, args)
+    # print("Starting training...")
+    # model = train_model(model, train_loader, val_loader, args)
+
+    # Load best model if available
+    #
+    best_model_path = os.path.join(args.output_dir, "best_model.pt")
+    if os.path.exists(best_model_path):
+        print(f"Loading best model from {best_model_path}")
+        model.load_state_dict(torch.load(best_model_path))
+
+    scripted_model = torch.jit.script(model)
+    scripted_model.save(os.path.join(args.output_dir, "vqvae_model.pt"))
 
     # Evaluate model
-    print("Evaluating model...")
-    mse, psnr = evaluate_model(model, test_loader, args)
+    # print("Evaluating model...")
+    #mse, psnr = evaluate_model(model, test_loader, args)
 
     # Compress test dataset
+    # Compress test dataset
     print("Compressing test dataset...")
+
     compressed_file = os.path.join(args.output_dir, "compressed_indices.vqvdb")
-    origins = np.load(args.origins_file) if args.origins_file else None
-    compression_ratio = compress_dataset(model, test_loader, compressed_file, args, origins)
+
+    if args.compress_file is not None:
+        # ──►  ONE-FILE MODE  ◄────────────────────────────────────
+        grid_path = Path(args.compress_file).resolve()
+        if not grid_path.exists():
+            raise FileNotFoundError(grid_path)
+
+        # Build a tiny dataset / loader that yields just this file
+        single_dataset = VDBLeafDataset(
+            [grid_path],
+            include_origins=False,
+        )
+        single_loader = DataLoader(single_dataset, batch_size=args.batch_size,
+                                   shuffle=False, num_workers=0)
+
+        # Find and load the matching origin file, if any
+        if args.origins_dir:
+            origin_path = Path(args.origins_dir) / (grid_path.stem + "._origins.npy")
+            if origin_path.exists():
+                single_origin = np.load(origin_path).astype(np.int32)
+
+                # Compress just this grid
+                compression_ratio = compress_dataset(model, single_loader,
+                                                     compressed_file, args,
+                                                     origins=single_origin)
+    else:
+        # ──►  NORMAL TEST-SET MODE  ◄─────────────────────────────
+        compression_ratio = compress_dataset(model, test_loader,
+                                             compressed_file, args,
+                                             origins=origins)  # built earlier
 
     # Save metrics
     with open(os.path.join(args.output_dir, "metrics.txt"), "w") as f:
-        f.write(f"MSE: {mse:.6f}\n")
-        f.write(f"PSNR: {psnr:.2f} dB\n")
+        f.write(f"MSE: {0:.6f}\n")
+        f.write(f"PSNR: {0:.2f} dB\n")
         f.write(f"Compression ratio: {compression_ratio:.2f}x\n")
         f.write(f"Codebook size: {args.num_embeddings} entries, {args.embedding_dim} dimensions\n")
 

@@ -152,6 +152,10 @@ bool extractLeafData(const std::string& vdbFilePath, const std::string& gridName
 	for (auto iter = grid->tree().cbeginLeaf(); iter; ++iter) {
 		const auto& leaf = *iter;
 
+		if (leaf.isEmpty()) {
+			continue;
+		}
+
 		// Get origin of this leaf
 		Coord origin = leaf.origin();
 		originsData[leafIndex * 3 + 0] = origin.x();
@@ -189,9 +193,9 @@ bool extractLeafData(const std::string& vdbFilePath, const std::string& gridName
 	bool originSuccess = NpyWriter::writeInt32(originPath, originsData, originShape);
 
 	if (success && originSuccess) {
-		std::cout << "Successfully wrote " << leafCount << " leaf nodes to " << outputPath << " and origins to " << originPath << std::endl;
+		std::cout << "Successfully wrote " << leafCount << " leaf nodes to " << outputPath << " and origins to " << originPath << "\n";
 	} else {
-		std::cerr << "Failed to write NPY files" << std::endl;
+		std::cerr << "Failed to write NPY files" << "\n";
 	}
 
 	return success && originSuccess;

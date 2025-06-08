@@ -1,1 +1,1 @@
-from pyVDB import *
+from . import *

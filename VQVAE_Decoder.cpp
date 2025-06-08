@@ -16,6 +16,12 @@
 
 #include "Kernel.cuh"
 
+
+// Size of a dense “mega-leaf” (= one code-book entry)
+constexpr int BLOCK_DIM = 32;  // 32 × 32 × 32
+constexpr int BLOCK_VOXELS = BLOCK_DIM * BLOCK_DIM * BLOCK_DIM;
+
+
 // Host function to launch lookup kernel
 void lookupCodebook(const torch::Tensor& codebook, const torch::Tensor& indices, torch::Tensor& output) {
 	// Get tensor shapes and sizes
@@ -28,10 +34,6 @@ void lookupCodebook(const torch::Tensor& codebook, const torch::Tensor& indices,
 
 	// Get raw pointers to tensor data
 	const float* codebook_ptr = codebook.data_ptr<float>();
-
-	float* device_codebook_ptr;
-	cudaMalloc(&device_codebook_ptr, sizeof(float) * embedding_dim * num_embeddings);
-
 
 	const uint16_t* indices_ptr = reinterpret_cast<const uint16_t*>(indices.data_ptr<int>());
 	float* output_ptr = output.data_ptr<float>();
@@ -79,6 +81,8 @@ std::vector<torch::Tensor> readCompressedIndices(const std::string& filename, Co
 		throw std::runtime_error("Unsupported file version");
 	}
 
+	std::cout << "Reading compressed indices from " << filename << " (version " << static_cast<int>(header.version) << ")" << std::endl;
+
 	// Read number of embeddings
 	file.read(reinterpret_cast<char*>(&header.numEmbeddings), sizeof(uint32_t));
 
@@ -118,19 +122,8 @@ std::vector<torch::Tensor> readCompressedIndices(const std::string& filename, Co
 		}
 
 		// Read indices
-		std::vector<int> indices_data(totalElements);
-
-		if (bytesPerIndex == 1) {
-			// Read as bytes and convert to int
-			std::vector<uint8_t> temp(totalElements);
-			file.read(reinterpret_cast<char*>(temp.data()), totalElements);
-			std::transform(temp.begin(), temp.end(), indices_data.begin(), [](uint8_t val) { return static_cast<int>(val); });
-		} else {
-			// Read as uint16_t and convert to int
-			std::vector<uint16_t> temp(totalElements);
-			file.read(reinterpret_cast<char*>(temp.data()), totalElements * sizeof(uint16_t));
-			std::transform(temp.begin(), temp.end(), indices_data.begin(), [](uint16_t val) { return static_cast<int>(val); });
-		}
+		std::vector<uint16_t> indices_data(totalElements);
+		file.read(reinterpret_cast<char*>(indices_data.data()), totalElements * sizeof(uint16_t));
 
 		// Create tensor and append to list
 		std::vector<int64_t> tensor_shape;
@@ -140,7 +133,7 @@ std::vector<torch::Tensor> readCompressedIndices(const std::string& filename, Co
 		}
 
 		torch::Tensor indices_tensor =
-		    torch::from_blob(indices_data.data(), tensor_shape, torch::TensorOptions().dtype(torch::kInt32)).clone();
+		    torch::from_blob(indices_data.data(), tensor_shape, torch::TensorOptions().dtype(torch::kInt16)).clone();
 
 		all_indices.push_back(indices_tensor);
 	}
@@ -162,15 +155,19 @@ void writeVoxelsToGrid(typename GridType::Ptr grid, const std::vector<openvdb::C
 	const int height = cpu_data.size(3);
 	const int width = cpu_data.size(4);
 
+	if (depth != BLOCK_DIM || height != BLOCK_DIM || width != BLOCK_DIM)
+		throw std::runtime_error("Decoded block is not 32³ – shape mismatch");
+
+
 	openvdb::tree::ValueAccessor<openvdb::FloatTree> acc(grid->tree());
 	// For each leaf
 	for (int b = 0; b < batch_size && b < static_cast<int>(origins.size()); b++) {
 		openvdb::Coord origin = origins[b];
 
 		// For each voxel in the leaf
-		for (int z = 0; z < depth; z++) {
-			for (int y = 0; y < height; y++) {
-				for (int x = 0; x < width; x++) {
+		for (int z = 0; z < BLOCK_DIM; z++) {
+			for (int y = 0; y < BLOCK_DIM; y++) {
+				for (int x = 0; x < BLOCK_DIM; x++) {
 					// Get voxel value
 					float value = cpu_data_float[b][0][z][y][x].item<float>();
 
@@ -236,7 +233,7 @@ class VQVAEDecoder {
 
 		// Pass through decoder
 		std::vector<torch::jit::IValue> inputs;
-		inputs.push_back(embeddings);
+		inputs.emplace_back(embeddings);
 
 
 		// Use the decode method from the TorchScript model
@@ -248,7 +245,7 @@ class VQVAEDecoder {
 			// Fallback if 'decode' method isn't available
 			std::cout << "Decode method not found, using forward pass with embeddings" << std::endl;
 			inputs.clear();
-			inputs.push_back(embeddings);
+			inputs.emplace_back(embeddings);
 			auto result = model_.forward(inputs);
 
 			// Extract the first element if it's a tuple (common for VQ-VAE forward to return
@@ -277,7 +274,7 @@ class VQVAEDecoder {
 		std::vector<torch::Tensor> all_indices = readCompressedIndices(compressed_file, header);
 
 		// Process each batch of indices
-		int total_leaves = 0;
+		int total_blocks = 0;
 		auto start_time = std::chrono::high_resolution_clock::now();
 
 		for (const auto& indices : all_indices) {
@@ -285,7 +282,7 @@ class VQVAEDecoder {
 			torch::Tensor voxels = decodeIndices(indices);
 
 			// Write voxels to grid
-			int batch_idx_offset = total_leaves;
+			int batch_idx_offset = total_blocks;
 			writeVoxelsToGrid<GridType>(
 			    output_grid,
 			    std::vector<openvdb::Coord>(
@@ -293,16 +290,14 @@ class VQVAEDecoder {
 			        header.origins.begin() + std::min<size_t>(batch_idx_offset + indices.size(0), header.origins.size())),
 			    voxels);
 
-			total_leaves += indices.size(0);
+			total_blocks += indices.size(0);
 		}
 
 		auto end_time = std::chrono::high_resolution_clock::now();
 		auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
 
-		std::cout << "Decoded " << total_leaves << " leaves in " << duration << " ms" << std::endl;
-		if (total_leaves > 0) {
-			std::cout << "Average: " << duration / total_leaves << " ms per leaf" << std::endl;
-		}
+		std::cout << "Decoded " << total_blocks << " blocks (32³) in " << duration << " ms\n";
+		if (total_blocks) std::cout << "Average: " << duration / total_blocks << " ms per block\n";
 	}
 
    private:
@@ -314,62 +309,35 @@ class VQVAEDecoder {
 
 int main(int argc, char** argv) {
 	if (argc < 5) {
-		std::cout << "Usage: " << argv[0] << " <model.pt> <compressed_indices.vqvdb> <input_template.vdb> <output.vdb> [grid_name]"
-		          << std::endl;
+		std::cout << "Usage: " << argv[0] << " <model.pt> <compressed_indices.vqvdb> <output.vdb> [grid_name]" << std::endl;
 		return 1;
 	}
 
 	const std::string model_path = argv[1];
 	const std::string compressed_path = argv[2];
-	const std::string input_template_path = argv[3];
-	const std::string output_path = argv[4];
-	const std::string grid_name = (argc > 5) ? argv[5] : "";
+	const std::string output_path = argv[3];
+	const std::string grid_name = (argc > 4) ? argv[4] : "";
 
 	try {
 		// Initialize OpenVDB
 		openvdb::initialize();
 
-		// Load template grid (for structure)
-		openvdb::io::File template_file(input_template_path);
-		template_file.open();
-
-		openvdb::GridBase::Ptr base_grid;
-		if (grid_name.empty()) {
-			base_grid = template_file.readGrid(template_file.beginName().gridName());
-		} else {
-			base_grid = template_file.readGrid(grid_name);
-		}
-
-		if (!base_grid) {
-			std::cerr << "Error: Could not read grid from template file" << std::endl;
-			return 1;
-		}
-
 		// Initialize decoder
 		VQVAEDecoder decoder(model_path);
 
-		// Process based on grid type
-		if (auto float_grid = openvdb::GridBase::grid<openvdb::FloatGrid>(base_grid)) {
-			// Create new grid for output
-			auto output_grid = openvdb::FloatGrid::create();
-			output_grid->setTransform(float_grid->transformPtr());
-			output_grid->setGridClass(float_grid->getGridClass());
-			output_grid->setName(float_grid->getName());
+		// Create new grid for output
+		auto output_grid = openvdb::FloatGrid::create();
 
-			// Decode compressed data to grid (leaf origins are read from the .vqvdb file)
-			decoder.decodeToGrid<openvdb::FloatGrid>(compressed_path, output_grid);
 
-			// Write output grid
-			openvdb::io::File file(output_path);
-			file.write({output_grid});
-			file.close();
+		// Decode compressed data to grid (leaf origins are read from the .vqvdb file)
+		decoder.decodeToGrid<openvdb::FloatGrid>(compressed_path, output_grid);
 
-		} else {
-			std::cerr << "Error: Currently only supports FloatGrid" << std::endl;
-			return 1;
-		}
+		// Write output grid
+		openvdb::io::File file(output_path);
+		file.write({output_grid});
+		file.close();
 
-		template_file.close();
+
 		std::cout << "Successfully decoded and saved to " << output_path << std::endl;
 
 	} catch (const std::exception& e) {
