@@ -111,7 +111,7 @@ bool extractLeafData(const std::string& vdbFilePath, const std::string& gridName
 	}
 
 	// Get grid
-	typename GridType::Ptr grid;
+	typename FloatGrid::Ptr grid;
 
 	if (gridName.empty()) {
 		// Use first grid if name not specified
