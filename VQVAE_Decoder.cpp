@@ -18,7 +18,7 @@
 
 
 // Size of a dense “mega-leaf” (= one code-book entry)
-constexpr int BLOCK_DIM = 32;  // 32 × 32 × 32
+constexpr int BLOCK_DIM = 8;  // 32 × 32 × 32
 constexpr int BLOCK_VOXELS = BLOCK_DIM * BLOCK_DIM * BLOCK_DIM;
 
 
@@ -202,66 +202,43 @@ class VQVAEDecoder {
 	}
 
 	void extractCodebook() {
-		// We need to extract the codebook weights from the model
-		// This is model-specific and depends on how your model is structured
-		for (const auto& p : model_.named_parameters()) {
-			if (p.name.find("vq.embedding.weight") != std::string::npos) {
-				codebook_ = p.value.clone().to(device_);
-				std::cout << "Found codebook with shape: [" << codebook_.size(0) << ", " << codebook_.size(1) << "]" << std::endl;
+		// The codebook is stored as a buffer, not a parameter, in the EMA version.
+		// We need to iterate through the model's named_buffers().
+		for (const auto& buffer : model_.named_buffers()) {
+			// The name in the scripted model will be 'vq.embedding'
+			if (buffer.name == "quantizer.embedding") {
+				codebook_ = buffer.value.clone().to(device_);
+				std::cout << "Found codebook buffer with shape: [" << codebook_.size(0) << ", " << codebook_.size(1) << "]" << std::endl;
 				return;
 			}
 		}
-		throw std::runtime_error("Could not find codebook in the model");
+
+		// If we get here, neither worked.
+		throw std::runtime_error("Could not find codebook in model's buffers ('vq.embedding') or parameters ('vq.embedding.weight')");
 	}
 
 	torch::Tensor decodeIndices(const torch::Tensor& indices) {
 		torch::NoGradGuard no_grad;
 
-		// Create output tensor to hold embeddings
-		int batch_size = indices.size(0);
-		int depth = indices.size(1);
-		int height = indices.size(2);
-		int width = indices.size(3);
-		int embedding_dim = codebook_.size(1);
+		// --- The ONLY thing you need to do ---
+		// 1. Ensure the indices are on the correct device and are of type long.
+		//    `torch::kInt64` (long) is the safest choice for F.embedding.
+		torch::Tensor final_indices = indices.to(device_, torch::kInt64);
 
-		auto options = torch::TensorOptions().dtype(torch::kFloat32).device(device_);
-
-		torch::Tensor embeddings = torch::empty({batch_size, embedding_dim, depth, height, width}, options);
-
-		// Look up embeddings using CUDA kernel
-		lookupCodebook(codebook_, indices.to(device_, torch::kInt32), embeddings);
-
-		// Pass through decoder
+		// 2. Prepare the input for the JIT method call.
 		std::vector<torch::jit::IValue> inputs;
-		inputs.emplace_back(embeddings);
+		inputs.emplace_back(final_indices);
 
-
-		// Use the decode method from the TorchScript model
+		// 3. Call the scripted 'decode' method and return the result.
 		torch::Tensor output;
 		try {
-			auto result = model_.get_method("decode")(inputs);
-			output = result.toTensor();
+			// This single call will perform the embedding lookup, permutation,
+			// and decoding, all within the optimized JIT graph.
+			output = model_.get_method("decode")(inputs).toTensor();
 		} catch (const c10::Error& e) {
-			// Fallback if 'decode' method isn't available
-			std::cout << "Decode method not found, using forward pass with embeddings" << std::endl;
-			inputs.clear();
-			inputs.emplace_back(embeddings);
-			auto result = model_.forward(inputs);
-
-			// Extract the first element if it's a tuple (common for VQ-VAE forward to return
-			// (reconstruction, vq_loss, indices))
-			if (result.isTuple()) {
-				auto resultTuple = result.toTuple();
-				if (resultTuple->elements().size() > 0) {
-					output = resultTuple->elements()[0].toTensor();
-				} else {
-					throw std::runtime_error("Forward method returned empty tuple");
-				}
-			} else if (result.isTensor()) {
-				output = result.toTensor();
-			} else {
-				throw std::runtime_error("Forward method returned unexpected type");
-			}
+			// It's good to keep this for debugging.
+			std::cerr << "An error occurred while calling the 'decode' method: " << e.what() << std::endl;
+			throw; // Re-throw the exception so the program terminates.
 		}
 
 		return output;
@@ -296,7 +273,7 @@ class VQVAEDecoder {
 		auto end_time = std::chrono::high_resolution_clock::now();
 		auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
 
-		std::cout << "Decoded " << total_blocks << " blocks (32³) in " << duration << " ms\n";
+		std::cout << "Decoded " << total_blocks << " blocks (8,8,8) in " << duration << " ms\n";
 		if (total_blocks) std::cout << "Average: " << duration / total_blocks << " ms per block\n";
 	}
 
