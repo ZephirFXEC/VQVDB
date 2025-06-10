@@ -2,7 +2,7 @@
 // Created by zphrfx on 04/06/2025.
 //
 
-#include "LeafExtractor.hpp"
+#include "../../LeafExtractor.hpp"
 
 int main(int argc, char** argv) {
 	if (argc < 3) {
