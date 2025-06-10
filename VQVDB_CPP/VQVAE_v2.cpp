@@ -2,7 +2,7 @@
 // Created by zphrfx on 10/06/2025.
 //
 
-#include "../VQVAE_v2.hpp"
+#include "VQVAE_v2.hpp"
 
 VectorQuantizerEMAImpl::VectorQuantizerEMAImpl(const int64_t num_embeddings, const int64_t embedding_dim, const float commitment_cost,
                                                const float decay, const float eps)

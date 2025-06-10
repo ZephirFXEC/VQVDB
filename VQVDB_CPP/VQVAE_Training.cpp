@@ -6,7 +6,7 @@
 
 #include <iostream>
 
-#include "../VQVAE_v2.hpp"
+#include "VQVAE_v2.hpp"
 
 int main() {
 	// --- Model Configuration ---

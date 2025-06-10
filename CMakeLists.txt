@@ -34,7 +34,7 @@ target_include_directories(HoudiniVDB INTERFACE
 list(APPEND CMAKE_PREFIX_PATH "libtorch")
 
 # Add CUDA kernel library
-add_library(kernels STATIC Kernel.cu)
+add_library(kernels STATIC VQVDB_CPP/Utils/Kernel.cu)
 target_link_libraries(kernels PUBLIC CUDA::cudart)
 set_target_properties(kernels PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
@@ -43,12 +43,22 @@ set_target_properties(kernels PROPERTIES
 
 # Add leaf extractor executable
 add_executable(leafextractor
-        LeafExtractor.cpp
-        LeafExtractor.hpp)
+        VQVDB_CPP/Utils/LeafExtractor.cpp
+        VQVDB_CPP/Utils/LeafExtractor.hpp)
 target_link_libraries(leafextractor PRIVATE HoudiniVDB)
 
+add_executable(VQVAE_v2
+        VQVDB_CPP/VQVAE_v2.cpp
+        VQVDB_CPP/VQVAE_v2.hpp
+        VQVDB_CPP/VQVAE_Training.cpp)
+target_link_libraries(VQVAE_v2 PRIVATE
+        HoudiniVDB
+        ${TORCH_LIBRARIES}
+        kernels
+)
+
 # Add decoder executable
-add_executable(vqvdb_decoder VQVAE_Decoder.cpp)
+add_executable(vqvdb_decoder VQVDB_CPP/VQVAE_Decoder.cpp)
 target_include_directories(vqvdb_decoder PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(vqvdb_decoder PRIVATE
         HoudiniVDB

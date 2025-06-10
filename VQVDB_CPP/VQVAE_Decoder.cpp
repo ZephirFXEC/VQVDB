@@ -14,7 +14,7 @@
 #include <memory>
 #include <vector>
 
-#include "../Kernel.cuh"
+#include "Utils/Kernel.cuh"
 
 
 // Size of a dense “mega-leaf” (= one code-book entry)
