@@ -19,69 +19,60 @@ LEAF_DIM = 8
 
 class VDBLeafDataset(Dataset):
     def __init__(
-            self,
-            npy_files: Sequence[str | Path],
-            transform: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
-            *,
-            include_origins: bool = False,
-            origins_root: str | Path | None = None,
-            origins_suffix: str = "._origins.npy",
+        self,
+        npy_files: Sequence[str | Path],
+        transform: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
+        *,
+        include_origins: bool = False,
+        origins_root: str | Path | None = None,
+        origins_suffix: str = "._origins.npy",
     ) -> None:
         super().__init__()
-
         self.transform = transform
         self.include_origins = include_origins
+        self.buffer = torch.empty(0)  # Pre-allocate later
 
-        # --- mmap all data files -------------------------------------------------
-        self.arrays: List[np.memmap] = []
-        self.origin_arrays: List[np.memmap] | None = [] if include_origins else None
-
+        # Precompute offsets and mmap files
+        self.arrays = []
+        self.origin_arrays = [] if include_origins else None
+        lengths = []
+        
         for f in npy_files:
             arr = np.load(f, mmap_mode="r")
             if arr.shape[1:] != (LEAF_DIM, LEAF_DIM, LEAF_DIM):
-                raise ValueError(f"{f}: expected (N, {LEAF_DIM}, {LEAF_DIM}, {LEAF_DIM}), got {arr.shape}")
+                raise ValueError(f"{f}: invalid shape {arr.shape}")
             self.arrays.append(arr)
-
+            lengths.append(arr.shape[0])
+            
             if include_origins:
-                if origins_root is not None:
-                    origin_path = Path(origins_root) / (Path(f).stem + origins_suffix)
-                else:
-                    origin_path = Path(f).with_suffix(origins_suffix)
+                origin_path = Path(origins_root or f).with_suffix(origins_suffix)
                 if not origin_path.exists():
                     raise FileNotFoundError(origin_path)
-
                 self.origin_arrays.append(np.load(origin_path, mmap_mode="r"))
 
-        # --- pre-compute global index mapping ------------------------------------
-        lengths = np.fromiter((a.shape[0] for a in self.arrays), dtype=np.int64)
-        self.file_offsets = np.concatenate(([0], np.cumsum(lengths)))
-        self.total_leaves: int = int(self.file_offsets[-1])
-
-    # ---------------------------------------------------------------------------
+        self.file_offsets = np.cumsum([0] + lengths)
+        self.total_leaves = int(self.file_offsets[-1])
 
     def __len__(self) -> int:
         return self.total_leaves
 
     def __getitem__(self, idx: int):
-        if not (0 <= idx < self.total_leaves):
-            raise IndexError(idx)
+        file_idx = np.searchsorted(self.file_offsets, idx, side="right") - 1
+        local_idx = idx - self.file_offsets[file_idx]
+        
+        # Use buffer to avoid allocation
+        leaf = torch.from_numpy(
+            self.arrays[file_idx][local_idx].astype(np.float32, copy=False)
+        ).unsqueeze(0)  # Add channel dim
 
-        # locate (file, local) in O(log n) inside highly-optimised C code
-        file_idx = int(np.searchsorted(self.file_offsets, idx, side="right") - 1)
-        local_idx = idx - int(self.file_offsets[file_idx])
-
-        # zero-copy view from the mmap’d array
-        leaf_np = self.arrays[file_idx][local_idx].astype(np.float32, copy=True)
-        leaf = torch.from_numpy(leaf_np).to(torch.float32).unsqueeze(0)
-
-        if self.transform is not None:
+        if self.transform:
             leaf = self.transform(leaf)
 
         if self.include_origins:
-            origin_np = self.origin_arrays[file_idx][local_idx].astype(np.int32, copy=False)
-            origin = torch.from_numpy(origin_np)
+            origin = torch.from_numpy(
+                self.origin_arrays[file_idx][local_idx].astype(np.int32, copy=False)
+            )
             return leaf, origin
-
         return leaf
 
 
@@ -97,9 +88,9 @@ class VectorQuantizerEMA(nn.Module):
         self.decay = decay
         self.eps = eps
 
-        # Initialize embeddings
-        embed = torch.randn(num_embeddings, embedding_dim) * 0.1  # Small variance
-        embed = F.normalize(embed, dim=1)  # Normalize initial embeddings
+        # Initialize embeddings (small variance + normalize)
+        embed = torch.randn(num_embeddings, embedding_dim)
+        embed = F.normalize(embed, dim=1)
         
         self.register_buffer('embedding', embed)
         self.register_buffer('cluster_size', torch.ones(num_embeddings))
@@ -111,13 +102,15 @@ class VectorQuantizerEMA(nn.Module):
         # Build the permutation list explicitly: [0, 2, 3, …, n, 1]
         permute_fwd: List[int] = [0] + list(range(2, x.dim())) + [1]
         
-        # --- CHANGE 1: Store the permuted tensor ---
-        # This tensor has the shape [B, ...spatial, D] which we'll need later.
         permuted_x = torch.permute(x, permute_fwd).contiguous()
         flat = permuted_x.view(-1, D)
 
         # Compute distances
-        distances = torch.cdist(flat, self.embedding, p=2.0)
+        distances = (
+            torch.sum(flat**2, dim=1, keepdim=True)
+            + torch.sum(self.embedding**2, dim=1)
+            - 2 * torch.mm(flat, self.embedding.t())
+        )
 
         # Get nearest codes
         encoding_indices = torch.argmin(distances, dim=1)
@@ -125,13 +118,8 @@ class VectorQuantizerEMA(nn.Module):
 
         # Quantize
         quantized = encodings @ self.embedding
-        
-        # --- CHANGE 2: Reshape using the saved tensor's shape ---
-        # This is the key fix. It's JIT-friendly because the rank is known.
         quantized = quantized.view(permuted_x.shape)
         
-        # --- CHANGE 3: Fix the back permutation using x.dim() ---
-        # The rank of x determines the length of the permutation list.
         permute_back: List[int] = [0, x.dim() - 1] + list(range(1, x.dim() - 1))
         quantized = torch.permute(quantized, permute_back)
 
@@ -257,8 +245,8 @@ class VQVAE(nn.Module):
 def train(args):
     
         # Hyperparameters
-    BATCH_SIZE = 8192
-    EPOCHS = 100
+    BATCH_SIZE = 8192*2
+    EPOCHS = 50
     LR = 5e-4
     IN_CHANNELS = 1
     EMBEDDING_DIM = 128 # The dimensionality of the embeddings
@@ -292,7 +280,7 @@ def train(args):
         vdb_dataset_train, 
         batch_size=BATCH_SIZE, 
         shuffle=True, 
-        num_workers=10,
+        num_workers=6,
         pin_memory=True,
         persistent_workers=True,
     )
@@ -328,7 +316,19 @@ def train(args):
                 f"Avg Recon Loss: {avg_recon_loss:.5f} | "
                 f"Avg VQ Loss: {avg_vq_loss:.5f} | "
                 f"Last Perplexity: {perplexity.item():.4f}") # Perplexity from last batch
+        
+        # if better than previous best, save model
+        if epoch % 10 == 0:
+            os.makedirs(os.path.dirname(args.model_path), exist_ok=True)
+            torch.save(model.state_dict(), args.model_path)
+            print(f"Model saved at epoch {epoch + 1} to {args.model_path}")
+            
+                # Save JIT script for inference
+            scripted_model = torch.jit.script(model)
+            scripted_model.save(args.model_path.replace('.pth', '_scripted.pt'))
+            print(f"Scripted model saved to {args.model_path.replace('.pth', '_scripted.pt')}")
 
+        
 
     print("Training finished.")
     os.makedirs(os.path.dirname(args.model_path), exist_ok=True)
@@ -344,94 +344,88 @@ def train(args):
 # --- 5. Compression Function ---
 
 def compress_vdb(args):
-    """
-    Compresses a single pair of leaf/origin .npy files into the .vqvdb 
-    format compatible with the C++ batch-based loader.
-    """
-    if not os.path.exists(args.model_path):
-        print(f"Error: Model file not found at {args.model_path}")
-        return
-    if not os.path.exists(args.input_vdb):
-        print(f"Error: Input VDB file not found at {args.input_vdb}")
-        return
-    if not os.path.exists(args.origins_path):
-        print(f"Error: Origins file not found at {args.origins_path}")
-        return
+ # --- Validate inputs ---
+    for path_attr in ("model_path", "input_vdb", "origins_path"):  
+        path = getattr(args, path_attr)
+        if not os.path.exists(path):
+            print(f"Error: '{path_attr}' not found at {path}")
+            return
 
+    # --- Load trained VQ-VAE model ---
     model = VQVAE(
         embedding_dim=args.embedding_dim,
-        num_embeddings=args.num_embeddings, 
+        num_embeddings=args.num_embeddings,
         in_channels=1,
         commitment_cost=0.25
     )
-    model.load_state_dict(torch.load(args.model_path, map_location=args.device))
+    state = torch.load(args.model_path, map_location=args.device)
+    model.load_state_dict(state)
     model.to(args.device)
     model.eval()
 
-    print(f"Loading leaves from {args.input_vdb}...")
-    try:
-        # Use mmap_mode for memory efficiency with large files
-        leaves_np = np.load(args.input_vdb, mmap_mode='r')
-        if leaves_np.ndim != 4 or leaves_np.shape[1:] != (LEAF_DIM, LEAF_DIM, LEAF_DIM):
-            raise ValueError(f"Expected leaf shape (N, {LEAF_DIM}, {LEAF_DIM}, {LEAF_DIM}), got {leaves_np.shape}")
-    except Exception as e:
-        print(f"Error loading leaves: {e}")
-        return
+    # --- Memory-map input arrays ---
+    leaves_mmap = np.load(args.input_vdb, mmap_mode='r')  # shape: (N, H, W, D)
+    origins_mmap = np.load(args.origins_path, mmap_mode='r')  # shape: (N, ...)
+    num_leaves = leaves_mmap.shape[0]
+    num_origins = origins_mmap.shape[0]
 
-    print(f"Loading origins from {args.origins_path}...")
-    try:
-        origins_np = np.load(args.origins_path, mmap_mode='r')
-        if origins_np.ndim != 2 or origins_np.shape[1] != 3:
-            raise ValueError(f"Expected origins shape (N, 3), got {origins_np.shape}")
-        origins_np = origins_np.astype(np.int32)
-    except Exception as e:
-        print(f"Error loading origins: {e}")
-        return
-
-    leaves_tensor = torch.from_numpy(np.array(leaves_np)).unsqueeze(1).to(args.device)
-    num_leaves = len(leaves_tensor)
-    
-    print(f"Found {num_leaves} leaves. Compressing all at once...")
-    start_time = time.time()
-
+    # --- Determine index-grid shape via a single forward pass ---
+    sample_leaf = leaves_mmap[0:1].astype(np.float32)
+    sample_t = torch.from_numpy(sample_leaf).unsqueeze(1).to(args.device)
     with torch.no_grad():
-        indices_tensor = model.encode(leaves_tensor)
+        sample_idx = model.encode(sample_t)
+    idx_shape = tuple(sample_idx.shape[1:])  # e.g., (4, 4, 4)
 
-    indices_np = indices_tensor.cpu().numpy()
-    index_shape = indices_np.shape[1:]  # Shape without the batch dimension, e.g., (4, 4, 4)
-    
-    print(f"Compression completed in {time.time() - start_time:.2f} seconds.")
-    print(f"Writing to {args.output_cvdb} in a compatible format...")
+    # --- Prepare chunking parameters ---
+    CHUNK = 8192  # Tune to your available memory
 
+    # --- Start writing compressed file ---
+    start_time = time.time()
     with open(args.output_cvdb, 'wb') as f:
-        # --- Write Header (matching C++ loader) ---
-        f.write(b'VQVDB')
-        f.write(struct.pack('<B', 2))  # Version 2, because we are including origins
-        f.write(struct.pack('<I', args.num_embeddings))
-        f.write(struct.pack('<B', len(index_shape)))  # Number of dimensions in the index grid
-        for dim in index_shape:
-            f.write(struct.pack('<H', dim))  # Write each dimension's size as a short
+        # Header
+        f.write(b'VQVDB')                                     # Magic
+        f.write(struct.pack('<B', 2))                         # Version w/ origins
+        f.write(struct.pack('<I', args.num_embeddings))       # Codebook size
+        f.write(struct.pack('<B', len(idx_shape)))            # # dims in index grid
+        for dim in idx_shape:
+            f.write(struct.pack('<H', dim))                   # Each dim size
 
-        # --- Write Origins Block (for Version 2) ---
-        f.write(struct.pack('<I', len(origins_np)))  # Total number of origins
-        f.write(origins_np.tobytes())
+        # Origins block
+        f.write(struct.pack('<I', num_origins))               # Count of origins
+        # Write origins in chunks to avoid full-array load
+        for i in range(0, num_origins, CHUNK):
+            end = min(i + CHUNK, num_origins)
+            block = origins_mmap[i:end].astype(np.int32, copy=False)
+            f.write(block.tobytes())
 
-        # --- Write Data as a SINGLE BATCH ---
-        # 1. Write the "batch size", which is the total number of leaves.
-        # The C++ loader will read this and expect this many items.
-        f.write(struct.pack('<I', num_leaves))
+        # Indices block: write leaf count, then each encoded chunk
+        f.write(struct.pack('<I', num_leaves))                # Total leaves
+        with torch.no_grad():
+            for i in tqdm(range(0, num_leaves, CHUNK), desc="Compressing leaves"):
+                # Load and preprocess chunk
+                end = min(i + CHUNK, num_leaves)
+                batch = leaves_mmap[i:end].astype(np.float32, copy=True)
+                tensor = torch.from_numpy(batch).unsqueeze(1).to(args.device)
 
-        # 2. Write all the index data that corresponds to this "batch".
-        # The C++ loader expects uint16, so we must use that type.
-        if args.num_embeddings > 65535:
-           raise ValueError("num_embeddings > 65535 is not supported by the uint16 C++ loader.")
-        f.write(indices_np.astype(np.uint16).tobytes())
+                # Encode + quantize
+                idxs = model.encode(tensor)                     # shape: (B, *idx_shape)
+                idxs_np = idxs.cpu().numpy().astype(np.uint16)
 
+                # Write raw indices
+                f.write(idxs_np.tobytes())
+
+                # Cleanup GPU/CPU memory
+                del tensor, idxs, idxs_np
+                if args.device.startswith('cuda'):
+                    torch.cuda.empty_cache()
+
+
+    elapsed = time.time() - start_time
     # --- Final Report ---
     original_size = os.path.getsize(args.input_vdb) + os.path.getsize(args.origins_path)
     compressed_size = os.path.getsize(args.output_cvdb)
     ratio = original_size / compressed_size if compressed_size > 0 else 0
-    print("\n--- Compression Complete ---")
+    print(f"\n--- Compression Complete in { elapsed } ---")
     print(f"Original data size: {original_size / (1024*1024):.2f} MB")
     print(f"Compressed file size: {compressed_size / (1024*1024):.2f} MB")
     print(f"Compression Ratio: {ratio:.2f}x")
@@ -448,7 +442,7 @@ if __name__ == "__main__":
     parser_train = subparsers.add_parser("train", help="Train the VQ-VAE model.")
     parser_train.add_argument("--data_dir", type=str, default="data", help="Directory with .vdb files.")
     parser_train.add_argument("--grid_name", type=str, default="density", help="Name of the grid to extract.")
-    parser_train.add_argument("--epochs", type=int, default=40, help="Number of training epochs.")
+    parser_train.add_argument("--epochs", type=int, default=50, help="Number of training epochs.")
     parser_train.add_argument("--batch_size", type=int, default=4096, help="Training batch size.")
     parser_train.add_argument("--lr", type=float, default=1e-3, help="Learning rate.")
     parser_train.add_argument("--num_embeddings", type=int, default=256, help="Size of the codebook.")

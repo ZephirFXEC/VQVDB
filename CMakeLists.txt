@@ -58,7 +58,9 @@ target_link_libraries(VQVAE_v2 PRIVATE
 )
 
 # Add decoder executable
-add_executable(vqvdb_decoder VQVDB_CPP/VQVAE_Decoder.cpp)
+add_executable(vqvdb_decoder VQVDB_CPP/VQVAE_Decoder.cpp
+        VQVDB_CPP/Utils/VQVDB_Reader.cpp
+        VQVDB_CPP/Utils/VQVDB_Reader.hpp)
 target_include_directories(vqvdb_decoder PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(vqvdb_decoder PRIVATE
         HoudiniVDB

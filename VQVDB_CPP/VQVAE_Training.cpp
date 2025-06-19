@@ -65,9 +65,9 @@ int main() {
 		std::cout << "Model scripted and saved to vq_vae_scripted.pt" << std::endl;
 
 		// --- Loading the Scripted Model ---
-		torch::jit::Module loaded_model = torch::jit::load("vq_vae_scripted.pt");
+		torch::jit::Module loaded_model = torch::jit::load("C:/Users/zphrfx/Desktop/hdk/VQVDB/models/vqvae_scripted.pt");
 		std::vector<torch::jit::IValue> inputs;
-		inputs.push_back(input);
+		inputs.emplace_back(input);
 
 		const auto output_tuple = loaded_model.forward(inputs).toTuple();
 		const torch::Tensor loaded_recon = output_tuple->elements()[0].toTensor();
