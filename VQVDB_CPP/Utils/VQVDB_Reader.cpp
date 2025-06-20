@@ -11,7 +11,7 @@ void CompressedIndexReader::readHeader() {
 	}
 
 	file_.read(reinterpret_cast<char*>(&header.version), 1);
-	if (header.version != 2) {  // The python script specifically writes version 2
+	if (header.version != 2) {
 		throw std::runtime_error("Unsupported file version. Expected version 2.");
 	}
 	std::cout << "Reading VQVDB file (version " << static_cast<int>(header.version) << ")" << std::endl;
@@ -48,16 +48,16 @@ std::optional<torch::Tensor> CompressedIndexReader::readNextBatch(size_t batchSi
 	if (elementsPerBlock == 0) return std::nullopt;  // Avoid division by zero
 
 	size_t elementsToRead = batchSize * elementsPerBlock;
-	std::vector<uint16_t> indices_data(elementsToRead);
+	std::vector<uint8_t> indices_data(elementsToRead);
 
-	file_.read(reinterpret_cast<char*>(indices_data.data()), elementsToRead * sizeof(uint16_t));
+	file_.read(reinterpret_cast<char*>(indices_data.data()), elementsToRead * sizeof(uint8_t));
 
 	const size_t bytesRead = file_.gcount();
 	if (bytesRead == 0) {
 		return std::nullopt;
 	}
 
-	const size_t elementsRead = bytesRead / sizeof(uint16_t);
+	const size_t elementsRead = bytesRead / sizeof(uint8_t);
 	const size_t actualBatchSize = elementsRead / elementsPerBlock;
 	if (actualBatchSize == 0) return std::nullopt;
 
@@ -69,5 +69,5 @@ std::optional<torch::Tensor> CompressedIndexReader::readNextBatch(size_t batchSi
 		tensor_shape.push_back(dim);
 	}
 
-	return torch::from_blob(indices_data.data(), tensor_shape, torch::TensorOptions().dtype(torch::kInt16)).clone();
+	return torch::from_blob(indices_data.data(), tensor_shape, torch::TensorOptions().dtype(torch::kUInt8)).clone();
 }

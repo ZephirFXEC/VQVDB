@@ -139,7 +139,7 @@ class VQVAEDecoder {
 		} catch (const c10::Error& e) {
 			// It's good to keep this for debugging.
 			std::cerr << "An error occurred while calling the 'decode' method: " << e.what() << std::endl;
-			throw; // Re-throw the exception so the program terminates.
+			throw;  // Re-throw the exception so the program terminates.
 		}
 
 		return output;
