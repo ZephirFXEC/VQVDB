@@ -26,7 +26,6 @@ constexpr uint16_t LEAF_VOXELS = LEAF_DIM * LEAF_DIM * LEAF_DIM;  // 512
 // Struct to hold the extracted data from a VDB file
 struct VDBData {
 	torch::Tensor blocks;  // A single tensor of shape [N, 1, 8, 8, 8]
-	std::vector<openvdb::Coord> origins;
 };
 
 // Load a FloatGrid from a VDB file
@@ -43,190 +42,157 @@ openvdb::FloatGrid::Ptr loadVDBGrid(const std::string& vdb_path, const std::stri
 		throw std::runtime_error("Failed to cast grid to FloatGrid. Check grid name and type.");
 	}
 
+	openvdb::initialize();  // Ensure VDB is initialized
 	return grid;
 }
 
-// Extract tensor blocks from a FloatGrid
-VDBData extractBlocksFromGrid(const openvdb::FloatGrid::Ptr& grid) {
-	const size_t leaf_count = grid->tree().leafCount();
-	std::cout << "Found " << leaf_count << " leaf nodes." << std::endl;
 
-	if (leaf_count == 0) {
-		return {torch::empty({0, 1, LEAF_DIM, LEAF_DIM, LEAF_DIM}), {}};
-	}
-
-	std::vector<torch::Tensor> block_list;
-	std::vector<openvdb::Coord> origins;
-
-	// Create leaf manager for parallel processing
-	const openvdb::tree::LeafManager<openvdb::FloatTree> leafManager(grid->tree());
-
-	// Resize containers
-	block_list.reserve(leaf_count);
-	origins.reserve(leaf_count);
-
-	// Process leaves in parallel
-	tbb::parallel_for(tbb::blocked_range<size_t>(0, leaf_count), [&](const tbb::blocked_range<size_t>& range) {
-		for (size_t idx = range.begin(); idx != range.end(); ++idx) {
-			auto& leaf = leafManager.leaf(idx);
-			if (leaf.isEmpty()) continue;  // skip empty leaves
-
-			// 1. Store the origin of the 8×8×8 block
-			origins[idx] = leaf.origin();
-
-			// 2. Wrap the leaf's internal buffer (layout: x-major → (x,y,z))
-			const float* buf = leaf.buffer().data();
-			torch::Tensor block = torch::from_blob(const_cast<float*>(buf), {LEAF_DIM, LEAF_DIM, LEAF_DIM},  // (x, y, z)
-			                                       torch::TensorOptions().dtype(torch::kFloat32));
-
-			// 3. Convert to (z, y, x), make contiguous, and add [N, C] dims
-			block = block
-			            .permute({2, 1, 0})  // (z, y, x)
-			            .unsqueeze_(0)       // channel dim
-			            .unsqueeze_(0);      // batch dim
-
-			block_list[idx] = std::move(block);
-		}
-	});
-
-	std::cout << "Found " << block_list.size() << " non-empty leaf nodes." << std::endl;
-
-	if (block_list.empty()) {
-		return {torch::empty({0, 1, LEAF_DIM, LEAF_DIM, LEAF_DIM}), {}};
-	}
-
-	const torch::Tensor all_blocks = torch::cat(block_list, 0);
-
-	return {all_blocks, origins};
-}
-
-// Wrapper function to maintain compatibility
-VDBData extractBlocksFromVDB(const std::string& vdb_path, const std::string& grid_name) {
-	const auto grid = loadVDBGrid(vdb_path, grid_name);
-	return extractBlocksFromGrid(grid);
-}
-
-
-
-class VQVAEEncoder {
+class VDBBlockStreamer {
    public:
-	explicit VQVAEEncoder(const std::string& model_path) : device_(torch::kCPU) {
-		// Use GPU if available
-		device_ = torch::cuda::is_available() ? torch::kCUDA : torch::kCPU;
-		std::cout << "Using device: " << device_ << std::endl;
+	VDBBlockStreamer(const openvdb::tree::LeafManager<openvdb::FloatTree>& leafManager, const std::vector<size_t>& nonEmptyLeafIndices)
+	    : leafManager_(leafManager), leafIndices_(nonEmptyLeafIndices), currentPos_(0) {}
 
-		try {
-			// Load the scripted model (contains code and weights)
-			model_ = torch::jit::load(model_path);
-			model_.eval();  // Set to evaluation mode
-			model_.to(device_);
-		} catch (const c10::Error& e) {
-			std::cerr << "Error loading the model: " << e.what() << std::endl;
-			throw;
-		}
-	}
+	[[nodiscard]] bool hasNext() const noexcept { return currentPos_ < leafIndices_.size(); }
 
-	void compress(const std::string& input_vdb_path, const std::string& grid_name, const std::string& output_path) const {
-		auto start_time_loading = std::chrono::high_resolution_clock::now();
+	torch::Tensor nextBatch(const size_t maxBatch) {
+		if (!hasNext()) return torch::empty({0});
 
-		// 1. Extract data from the VDB file
-		auto [blocks, origins] = extractBlocksFromVDB(input_vdb_path, grid_name);
-		if (origins.empty()) {
-			std::cout << "No active voxels found in VDB. Output will be empty." << std::endl;
-			return;
-		}
+		const size_t start = currentPos_;
+		const size_t end = std::min(start + maxBatch, leafIndices_.size());
+		currentPos_ = end;
+		const size_t B = end - start;
 
-		auto start_time_compression = std::chrono::high_resolution_clock::now();
+		// Pinned host memory ⇒ async H2D possible later
+		auto opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU).pinned_memory(true);
 
+		torch::Tensor batch = torch::empty({static_cast<long>(B), 1, LEAF_DIM, LEAF_DIM, LEAF_DIM}, opts);
 
-		const int64_t num_leaves = origins.size();
-		std::ofstream out_file(output_path, std::ios::binary);
-		if (!out_file) {
-			throw std::runtime_error("Failed to open output file for writing: " + output_path);
-		}
+		constexpr size_t elemPerLeaf = LEAF_DIM * LEAF_DIM * LEAF_DIM;
+		float* dstBase = batch.data_ptr<float>();
 
-		// 2. Write file header (matching Python script's `compress_vdb`)
-		out_file.write("VQVDB", 5);          // Magic
-		write_binary<uint8_t>(out_file, 2);  // Version
+		tbb::parallel_for(tbb::blocked_range<size_t>(0, B), [&](auto r) {
+			for (size_t i = r.begin(); i != r.end(); ++i) {
+				const size_t leafIdx = leafIndices_[start + i];
+				const auto& leaf = leafManager_.leaf(leafIdx);
+				const float* src = leaf.buffer().data();
+				float* dst = dstBase + i * elemPerLeaf;
+				std::memcpy(dst, src, elemPerLeaf * sizeof(float));
+			}
+		});
 
-		// Get index grid shape from a sample pass
-		auto sample_indices = encode_batch(blocks.slice(0, 0, 1));
-		const auto idx_dims = sample_indices.sizes();
-
-		write_binary<uint32_t>(out_file, static_cast<uint32_t>(sample_indices.size(0)));  // num_embeddings not used, just to match format.
-		write_binary<uint8_t>(out_file, static_cast<uint8_t>(idx_dims.size() - 1));  // num dimensions in index grid (e.g., 3 for [B,D,H,W])
-		for (size_t i = 1; i < idx_dims.size(); ++i) {
-			write_binary<uint16_t>(out_file, static_cast<uint16_t>(idx_dims[i]));
-		}
-
-		// 3. Write origins block
-		write_binary<uint32_t>(out_file, static_cast<uint32_t>(num_leaves));
-		for (const auto& origin : origins) {
-			write_binary<int32_t>(out_file, origin.x());
-			write_binary<int32_t>(out_file, origin.y());
-			write_binary<int32_t>(out_file, origin.z());
-		}
-
-		// 4. Write indices block in chunks
-		write_binary<uint32_t>(out_file, static_cast<uint32_t>(num_leaves));
-		constexpr int64_t CHUNK_SIZE = 8192;  // Match Python script
-
-		std::cout << "Compressing " << num_leaves << " blocks in chunks of " << CHUNK_SIZE << "..." << std::endl;
-		for (int64_t i = 0; i < num_leaves; i += CHUNK_SIZE) {
-			int64_t end = std::min(i + CHUNK_SIZE, num_leaves);
-			auto batch_tensor = blocks.slice(0, i, end);
-
-			// Encode the batch
-			auto indices = encode_batch(batch_tensor);
-
-			// Convert to uint8 for writing
-			auto indices_u8 = indices.to(torch::kCPU, torch::kU8);
-
-			// Write raw bytes to file
-			out_file.write(reinterpret_cast<const char*>(indices_u8.data_ptr<uint8_t>()),
-			               indices_u8.numel()  // Total number of bytes
-			);
-		}
-
-		out_file.close();
-
-		const auto end_time = std::chrono::high_resolution_clock::now();
-		const auto duration_compression = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time_compression).count();
-		const auto duration_loading =
-		    std::chrono::duration_cast<std::chrono::milliseconds>(start_time_compression - start_time_loading).count();
-
-		// 5. Final Report
-		const size_t original_size = std::filesystem::file_size(input_vdb_path);
-		const size_t compressed_size = std::filesystem::file_size(output_path);
-		const double ratio = (compressed_size > 0) ? static_cast<double>(original_size) / compressed_size : 0.0;
-
-		printf("\n--- Loading Complete in %lld ms ---\n", duration_loading);
-		printf("\n--- Compression Complete in %lld ms ---\n", duration_compression);
-		printf("Original data size: %.2f MB\n", original_size / (1024.0 * 1024.0));
-		printf("Compressed file size: %.2f MB\n", compressed_size / (1024.0 * 1024.0));
-		printf("Compression Ratio: %.2fx\n", ratio);
-		printf("Saved to %s\n", output_path.c_str());
+		return batch;  // Already [B,1,D,H,W] – no permute/unsqueeze needed
 	}
 
    private:
-	torch::Tensor encode_batch(const torch::Tensor& batch) const {
-		torch::NoGradGuard no_grad;
+	const openvdb::tree::LeafManager<openvdb::FloatTree>& leafManager_;
+	const std::vector<size_t>& leafIndices_;
+	size_t currentPos_;
+};
 
-		// Move batch to the correct device
-		const torch::Tensor input_tensor = batch.to(device_);
-
-		// Prepare input for the JIT method call
-		std::vector<torch::jit::IValue> inputs;
-		inputs.push_back(input_tensor);
-
-		// Call the scripted 'encode' method
-		torch::Tensor indices = model_.get_method("encode")(inputs).toTensor();
-
-		return indices;
+class VQVAEEncoder {
+   public:
+	explicit VQVAEEncoder(const std::string& modelPath)
+	    : device_(torch::cuda::is_available() ? torch::kCUDA : torch::kCPU),
+	      model_(torch::jit::load(modelPath)),
+	      encodeMethod_(model_.get_method("encode"))  // then grab method
+	{
+		std::cout << "Using device: " << device_ << '\n';
+		model_.eval();
+		model_.to(device_, device_.is_cuda() ? torch::kHalf : torch::kFloat32);
 	}
 
-	torch::jit::Module model_;
+
+	/**  Compress one grid into a .vqvdb file  */
+	void compress(const std::string& inputVDB, const std::string& gridName, const std::string& outPath) {
+		const auto t0 = std::chrono::high_resolution_clock::now();
+		auto grid = loadVDBGrid(inputVDB, gridName);  // implement elsewhere
+
+		const openvdb::tree::LeafManager<openvdb::FloatTree> leafMgr(grid->tree());
+
+		std::vector<openvdb::Coord> origins;
+		origins.reserve(leafMgr.leafCount());
+		std::vector<size_t> leafIdx;
+		leafIdx.reserve(leafMgr.leafCount());
+
+		for (size_t i = 0; i < leafMgr.leafCount(); ++i) {
+			origins.push_back(leafMgr.leaf(i).origin());
+			leafIdx.push_back(i);
+		}
+
+		const int64_t N = origins.size();
+		if (N == 0) {
+			std::cout << "No active voxels - nothing to do.\n";
+			return;
+		}
+
+		// ---------- open output + header ----------
+		std::ofstream out(outPath, std::ios::binary);
+		if (!out) throw std::runtime_error("Cannot open output file " + outPath);
+
+		out.write("VQVDB", 5);          // magic
+		write_binary<uint8_t>(out, 2);  // version
+		{                               // sample dims
+			torch::Tensor s = torch::randn({1, 1, LEAF_DIM, LEAF_DIM, LEAF_DIM});
+			auto idx = encodeBatch(s).sizes();
+			write_binary<uint32_t>(out, 0);
+			write_binary<uint8_t>(out, static_cast<uint8_t>(idx.size() - 1));
+			for (size_t i = 1; i < idx.size(); ++i) write_binary<uint16_t>(out, static_cast<uint16_t>(idx[i]));
+		}
+		write_binary<uint32_t>(out, static_cast<uint32_t>(N));  // #origins
+		for (const auto& o : origins) {
+			write_binary<int32_t>(out, o.x());
+			write_binary<int32_t>(out, o.y());
+			write_binary<int32_t>(out, o.z());
+		}
+		write_binary<uint32_t>(out, static_cast<uint32_t>(N));  // #blocks
+
+		// ---------- streaming ----------
+		constexpr int64_t BATCH = 8192;
+		VDBBlockStreamer stream(leafMgr, leafIdx);
+
+		int64_t done = 0;
+		const auto t1 = std::chrono::high_resolution_clock::now();
+
+		while (stream.hasNext()) {
+			torch::Tensor host = stream.nextBatch(BATCH);
+			if (host.numel() == 0) break;
+
+			torch::Tensor idx8 = encodeBatch(host);  // uint8 on CPU
+
+			out.write(reinterpret_cast<const char*>(idx8.data_ptr<uint8_t>()), idx8.numel());
+			done += host.size(0);
+			std::cout << "\rProcessed " << done << '/' << N << " blocks..." << std::flush;
+		}
+		std::cout << '\n';
+		out.close();
+
+		// ---------- stats ----------
+		const auto t2 = std::chrono::high_resolution_clock::now();
+		const auto load = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+		const auto comp = std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count();
+
+		auto origSize = std::filesystem::file_size(inputVDB);
+		auto cmpSize = std::filesystem::file_size(outPath);
+
+			printf("\n-- Load  : %lld ms\n-- Encode : %lld ms\n", load, comp);
+		printf("Original %.2f MB -> Compressed %.2f MB  (%.2fx)\n", origSize / 1.048e6, cmpSize / 1.048e6,
+		       (cmpSize ? static_cast<double>(origSize) / cmpSize : 0.0));
+	}
+
+   private:
+	/** hostBatch: pinned FP32 on CPU.  Returns **uint8 on CPU**. */
+	torch::Tensor encodeBatch(const torch::Tensor& hostBatch) const {
+		torch::NoGradGuard nograd;
+
+		torch::Tensor gpu = hostBatch.to(device_, torch::kHalf, /*non_blocking=*/true);
+		torch::Tensor idx = encodeMethod_({gpu}).toTensor();  // → int64/32 on device
+
+		return idx.to(torch::kCPU, torch::kU8, /*non_blocking=*/true);
+	}
+
 	torch::Device device_;
+	torch::jit::Module model_;
+	torch::jit::Method encodeMethod_;
 };
 
 
@@ -245,7 +211,7 @@ int main(int argc, char** argv) {
 		// Initialize OpenVDB
 		openvdb::initialize();
 
-		const VQVAEEncoder encoder(model_path);
+		VQVAEEncoder encoder(model_path);
 		encoder.compress(input_path, grid_name, output_path);
 
 	} catch (const std::exception& e) {
