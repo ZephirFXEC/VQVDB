@@ -49,7 +49,10 @@ void lookupCodebook(const torch::Tensor& codebook, const torch::Tensor& indices,
 }
 
 template <typename GridType>
-void writeVoxelsToGrid(typename GridType::Ptr grid, const std::vector<openvdb::Coord>& origins, const torch::Tensor& voxelData) {
+void writeVoxelsToGrid(const typename GridType::Ptr& grid, const std::vector<openvdb::Coord>& origins, const torch::Tensor& voxelData) {
+	// --- Type aliases for clarity ---
+	using TreeType = typename GridType::TreeType;
+	using LeafNodeType = typename TreeType::LeafNodeType;
 	using ValueT = typename GridType::ValueType;
 
 	// Move data to CPU float tensor once

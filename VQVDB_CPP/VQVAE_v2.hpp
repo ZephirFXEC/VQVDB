@@ -60,10 +60,14 @@ struct VQVAEImpl final : torch::nn::Module {
 		decoder = register_module("decoder", Decoder(embedding_dim, in_channels));
 	}
 
-	std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> forward(const torch::Tensor& x);
+	std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> forward(const torch::Tensor& x);
 	torch::Tensor encode(const torch::Tensor& x);
 	torch::Tensor decode(const torch::Tensor& indices);
 
 	const torch::Tensor& get_codebook() { return quantizer->embedding; }
+
+	// --- Extras to mirror Python API -----------------------------------------
+	const torch::Tensor& encoder_outputs_to_flat(const torch::Tensor& z);
+	void check_and_reset_dead_codes(const torch::Tensor& encoder_outputs);
 };
 TORCH_MODULE(VQVAE);

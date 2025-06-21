@@ -205,6 +205,7 @@ class VQVAE(nn.Module):
         x_recon = self.decoder(quantized)
         return z, x_recon, vq_loss, perplexity
 
+    @torch.jit.export
     def encode(self, x) -> torch.Tensor:
         z = self.encoder(x)
 
@@ -223,7 +224,7 @@ class VQVAE(nn.Module):
                      - 2 * torch.matmul(flat_z, self.quantizer.embedding.t()))
         indices = torch.argmin(distances, dim=1)
 
-        return indices.view(B, *spatial)
+        return indices.view([B] + spatial)
 
     @torch.jit.export
     def decode(self, indices):
@@ -510,14 +511,7 @@ def compress_vdb(args):
 
 # --- 6. Main Argument Parser ---
 
-if __name__ == "__main__":
-    
-    model = VQVAE(1, 128, 256, 0.25)  # Replace with your model class
-    model.load_state_dict(torch.load("models/vqvae.pth", map_location="cuda"))
-    
-    scripted_model = torch.jit.script(model)
-    scripted_model.save("models/vqvae_scripted.pt")
-    
+if __name__ == "__main__":   
     parser = argparse.ArgumentParser(description="VQ-VAE Compressor for OpenVDB files.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 

@@ -34,9 +34,10 @@ int main() {
 	// --- Forward Pass ---
 	std::cout << "\n--- Testing Forward Pass ---" << std::endl;
 	model->train();  // Set model to training mode to test EMA updates
-	auto [recon, loss, perplexity] = model->forward(input);
+	auto [z, recon, loss, perplexity] = model->forward(input);
 
 	std::cout << "Input shape: " << input.sizes() << std::endl;
+	std::cout << "Latent z shape: " << z.sizes() << std::endl;
 	std::cout << "Reconstruction shape: " << recon.sizes() << std::endl;
 	std::cout << "VQ Loss: " << loss.item<float>() << std::endl;
 	std::cout << "Perplexity: " << perplexity.item<float>() << std::endl;
@@ -61,16 +62,27 @@ int main() {
 	// --- JIT Scripting and Saving ---
 	try {
 		std::cout << "\n--- Scripting and Saving Model ---" << std::endl;
-		torch::save(model, "vq_vae_scripted.pt");
+
+		// ---------------------- THE FIX ----------------------
+		// 1. Explicitly script your C++ module into a torch::jit::Module.
+		//    This traces the `forward` method and converts its logic into TorchScript.
+		auto scripted_model = torch::jit::script(model);
+
+		// 2. Save the *scripted* module. This saves both the code and the weights.
+		scripted_model.save("vq_vae_scripted.pt");
+		// -----------------------------------------------------
+
 		std::cout << "Model scripted and saved to vq_vae_scripted.pt" << std::endl;
 
 		// --- Loading the Scripted Model ---
-		torch::jit::Module loaded_model = torch::jit::load("C:/Users/zphrfx/Desktop/hdk/VQVDB/models/vqvae_scripted.pt");
+		// This part will now work correctly because the file contains the 'forward' method.
+		torch::jit::Module loaded_model = torch::jit::load("vq_vae_scripted.pt");
 		std::vector<torch::jit::IValue> inputs;
 		inputs.emplace_back(input);
 
+		// The forward method now exists on the loaded module
 		const auto output_tuple = loaded_model.forward(inputs).toTuple();
-		const torch::Tensor loaded_recon = output_tuple->elements()[0].toTensor();
+		const torch::Tensor loaded_recon = output_tuple->elements()[1].toTensor();
 
 		std::cout << "Loaded model reconstruction shape: " << loaded_recon.sizes() << std::endl;
 		std::cout << "Test successful." << std::endl;
