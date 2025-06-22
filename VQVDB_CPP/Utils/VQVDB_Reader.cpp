@@ -5,34 +5,35 @@
 #include "VQVDB_Reader.hpp"
 
 void CompressedIndexReader::readHeader() {
+	// Magic
 	file_.read(header.magic, 5);
 	if (std::string(header.magic, 5) != "VQVDB") {
-		throw std::runtime_error("Invalid file format: incorrect magic number");
+		throw std::runtime_error("Invalid file format: bad magic");
 	}
 
+	// Version
 	file_.read(reinterpret_cast<char*>(&header.version), 1);
 	if (header.version != 2) {
-		throw std::runtime_error("Unsupported file version. Expected version 2.");
+		throw std::runtime_error("Unsupported file version: expected 2, got " + std::to_string(int(header.version)));
 	}
-	std::cout << "Reading VQVDB file (version " << static_cast<int>(header.version) << ")" << std::endl;
+	std::cout << "Reading VQVDB file (version " << int(header.version) << ")\n";
 
-	file_.read(reinterpret_cast<char*>(&header.numEmbeddings), sizeof(uint32_t));
+	// numEmbeddings
+	file_.read(reinterpret_cast<char*>(&header.numEmbeddings), sizeof(header.numEmbeddings));
+
+	// numDimensions + shape[]
 	file_.read(reinterpret_cast<char*>(&header.numDimensions), 1);
 	header.shape.resize(header.numDimensions);
 	file_.read(reinterpret_cast<char*>(header.shape.data()), header.numDimensions * sizeof(uint16_t));
 
-	// Read Origins Block
-	uint32_t num_origins;
-	file_.read(reinterpret_cast<char*>(&num_origins), sizeof(uint32_t));
-	header.origins.resize(num_origins);
-	// BUG FIX: The C++ side expects int32_t for Coords. The Python script MUST write int32, not float32.
-	// This read will produce garbage if the writing script is not also fixed.
-	file_.read(reinterpret_cast<char*>(header.origins.data()), num_origins * sizeof(openvdb::Coord));
+	// Origins block
+	uint32_t nOrig;
+	file_.read(reinterpret_cast<char*>(&nOrig), sizeof(nOrig));
+	header.origins.resize(nOrig);
+	file_.read(reinterpret_cast<char*>(header.origins.data()), nOrig * sizeof(openvdb::Coord));
 
-	// Read Indices Block Header
-	file_.read(reinterpret_cast<char*>(&header.leafCount), sizeof(uint32_t));
-
-	// The current position of the file stream is now at the beginning of the continuous index data.
+	// Leaf‐count
+	file_.read(reinterpret_cast<char*>(&header.leafCount), sizeof(header.leafCount));
 }
 
 // This function now correctly reads from a continuous block of data.
@@ -41,33 +42,31 @@ std::optional<torch::Tensor> CompressedIndexReader::readNextBatch(size_t batchSi
 		return std::nullopt;
 	}
 
-	size_t elementsPerBlock = 1;
-	for (uint16_t dim : header.shape) {
-		elementsPerBlock *= dim;
-	}
-	if (elementsPerBlock == 0) return std::nullopt;  // Avoid division by zero
+	// Allocate a pinned‐CPU tensor [batchSize, elementsPerBlock_]
+	auto options = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU).pinned_memory(true);
+	torch::Tensor tensor = torch::empty({int64_t(batchSize), int64_t(elementsPerBlock_)}, options);
 
-	size_t elementsToRead = batchSize * elementsPerBlock;
-	std::vector<uint8_t> indices_data(elementsToRead);
-
-	file_.read(reinterpret_cast<char*>(indices_data.data()), elementsToRead * sizeof(uint8_t));
-
-	const size_t bytesRead = file_.gcount();
+	// Read raw bytes directly into that tensor
+	file_.read(reinterpret_cast<char*>(tensor.data_ptr<uint8_t>()), std::streamsize(batchSize * elementsPerBlock_));
+	size_t bytesRead = file_.gcount();
 	if (bytesRead == 0) {
 		return std::nullopt;
 	}
 
-	const size_t elementsRead = bytesRead / sizeof(uint8_t);
-	const size_t actualBatchSize = elementsRead / elementsPerBlock;
-	if (actualBatchSize == 0) return std::nullopt;
-
-	indices_data.resize(elementsRead);
-
-	std::vector<int64_t> tensor_shape;
-	tensor_shape.push_back(actualBatchSize);
-	for (uint16_t dim : header.shape) {
-		tensor_shape.push_back(dim);
+	// Compute how many *full* blocks we actually got
+	size_t elemsRead = bytesRead;  // since one uint8_t = one byte
+	size_t blocksRead = elemsRead / elementsPerBlock_;
+	if (blocksRead == 0) {
+		return std::nullopt;  // dropped a partial block?
 	}
 
-	return torch::from_blob(indices_data.data(), tensor_shape, torch::TensorOptions().dtype(torch::kUInt8)).clone();
+	// Narrow to [blocksRead, elementsPerBlock_]
+	tensor = tensor.narrow(0, 0, int64_t(blocksRead));
+
+	// View to [blocksRead, D, H, W, …]
+	std::vector<int64_t> fullShape;
+	fullShape.reserve(1 + tensorShapeSuffix_.size());
+	fullShape.push_back(int64_t(blocksRead));
+	fullShape.insert(fullShape.end(), tensorShapeSuffix_.begin(), tensorShapeSuffix_.end());
+	return tensor.view(fullShape);
 }

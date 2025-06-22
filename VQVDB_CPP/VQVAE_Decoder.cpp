@@ -49,41 +49,37 @@ void lookupCodebook(const torch::Tensor& codebook, const torch::Tensor& indices,
 }
 
 template <typename GridType>
-void writeVoxelsToGrid(const typename GridType::Ptr& grid, const std::vector<openvdb::Coord>& origins, const torch::Tensor& voxelData) {
-	// --- Type aliases for clarity ---
+void writeVoxelsToGrid(const openvdb::tree::ValueAccessor<openvdb::FloatTree>& grid, const std::vector<openvdb::Coord>& origins,
+                       const float* __restrict__ raw, int B) {
 	using TreeType = typename GridType::TreeType;
-	using LeafNodeType = typename TreeType::LeafNodeType;
 	using ValueT = typename GridType::ValueType;
 
-	// Move data to CPU float tensor once
-	const auto cpu = voxelData.to(torch::kCPU, torch::kFloat32);
-	const float* raw = cpu.data_ptr<float>();
+	const int D = BLOCK_DIM, H = BLOCK_DIM, W = BLOCK_DIM;
+	const int WH = W * H;
+	const int blockSize = D * WH;
 
-	const int B = cpu.size(0);
-	const int D = cpu.size(2);
-	const int H = cpu.size(3);
-	const int W = cpu.size(4);
+	for (int b = 0; b < B; ++b) {
+		const openvdb::Coord& org = origins[b];
+		const float* blockPtr = raw + int64_t(b) * blockSize;
 
-	if (D != BLOCK_DIM || H != BLOCK_DIM || W != BLOCK_DIM) throw std::runtime_error("Decoded block is not 8³ – shape mismatch");
+		// grab (or create) the leaf node covering this block
+		const auto leaf = grid.tree().touchLeaf(org);
+		ValueT* leafPtr = leaf->buffer().data();
+		// leaf->origin() gives the base coords of this leaf; not actually needed here
 
-	// Precompute per‐block stride: B × C × D × H × W with C==1
-	const int64_t blockSize = int64_t(D) * H * W;
-	openvdb::tree::ValueAccessor<openvdb::FloatTree> acc(grid->tree());
+		// flattened 1D loop
+		for (int idx = 0; idx < blockSize; ++idx) {
+			float v = blockPtr[idx];
+			if (v == 0.0f) continue;  // skip empties
 
-	for (int b = 0; b < B && b < (int)origins.size(); ++b) {
-		const auto& origin = origins[b];
-		const float* blockPtr = raw + b * blockSize;
+			int z = idx / WH;
+			int rem = idx % WH;
+			int y = rem / W;
+			int x = rem % W;
 
-		// Each voxel
-		for (int z = 0; z < D; ++z) {
-			int64_t zOff = z * (H * W);
-			for (int y = 0; y < H; ++y) {
-				int64_t yzOff = zOff + y * W;
-				for (int x = 0; x < W; ++x) {
-					float v = blockPtr[yzOff + x];
-					acc.setValue(openvdb::Coord(origin.x() + x, origin.y() + y, origin.z() + z), static_cast<ValueT>(v));
-				}
-			}
+			// compute local index in leaf’s backing array
+			int localIdx = (z * H + y) * W + x;
+			leafPtr[localIdx] = static_cast<ValueT>(v);
 		}
 	}
 }
@@ -91,104 +87,69 @@ void writeVoxelsToGrid(const typename GridType::Ptr& grid, const std::vector<ope
 // Main decoder class
 class VQVAEDecoder {
    public:
-	explicit VQVAEDecoder(const std::string& model_path) : device_(torch::kCUDA) {
-		try {
-			model_ = torch::jit::load(model_path);
-			model_.eval();
+	explicit VQVAEDecoder(const std::string& model_path)
+	    : device_(torch::cuda::is_available() ? torch::kCUDA : torch::kCPU),
+	      model_(torch::jit::load(model_path)),
+	      decodeMethod_(model_.get_method("decode")) {
+		std::cout << "Using device: " << device_ << std::endl;
 
-			model_.to(torch::kCUDA);
-			device_ = torch::kCUDA;
-			std::cout << "Using CUDA device for decoding" << std::endl;
+		model_.eval();
+		model_.to(device_, device_.is_cuda() ? torch::kHalf : torch::kFloat32);
 
-			extractCodebook();
-
-		} catch (const c10::Error& e) {
-			std::cerr << "Error loading the model: " << e.what() << std::endl;
-			throw;
+		// Lookup method "decode" from the JIT module
+		if (!model_.find_method("decode")) {
+			throw std::runtime_error("The provided PyTorch JIT model has no 'decode' method.");
 		}
 	}
 
-	void extractCodebook() {
-		for (const auto& [name, value] : model_.named_buffers()) {
-			if (name == "quantizer.embedding") {
-				codebook_ = value.clone().to(device_);
-				std::cout << "Found codebook buffer with shape: [" << codebook_.size(0) << ", " << codebook_.size(1) << "]" << std::endl;
-				return;
-			}
-		}
-
-		// If we get here, neither worked.
-		throw std::runtime_error("Could not find codebook in model's buffers ('vq.embedding') or parameters ('vq.embedding.weight')");
-	}
-
+	// Core function: Decodes a batch of indices into a [B,1,D,H,W] voxel tensor
 	torch::Tensor decodeIndices(const torch::Tensor& indices) const {
 		torch::NoGradGuard no_grad;
-
-		// --- The ONLY thing you need to do ---
-		// 1. Ensure the indices are on the correct device and are of type long.
-		//    `torch::kInt64` (long) is the safest choice for F.embedding.
-		torch::Tensor final_indices = indices.to(device_, torch::kInt64);
-
-		// 2. Prepare the input for the JIT method call.
-		std::vector<torch::jit::IValue> inputs;
-		inputs.emplace_back(final_indices);
-
-		// 3. Call the scripted 'decode' method and return the result.
-		torch::Tensor output;
-		try {
-			// This single call will perform the embedding lookup, permutation,
-			// and decoding, all within the optimized JIT graph.
-			output = model_.get_method("decode")(inputs).toTensor();
-		} catch (const c10::Error& e) {
-			// It's good to keep this for debugging.
-			std::cerr << "An error occurred while calling the 'decode' method: " << e.what() << std::endl;
-			throw;  // Re-throw the exception so the program terminates.
-		}
-
-		return output;
+		// Convert indices to device-friendly type
+		auto final_indices = indices.to(device_, torch::kInt32, /*non_blocking=*/true);
+		auto result = decodeMethod_({final_indices}).toTensor();  // shape [B,1,D,H,W]
+		return result;                                            // Still on device; final reshape done on CPU side
 	}
+
 
 	template <typename GridType>
 	void decodeToGrid(const std::string& compressed_file, const typename GridType::Ptr& output_grid) {
-		// Note: The batch size is now determined by the file, not the function argument.
-
-		// 1. Create the reader. It opens the file and reads the header.
 		CompressedIndexReader reader(compressed_file);
-
 		int total_blocks = 0;
 		auto start_time = std::chrono::high_resolution_clock::now();
 
-		// 2. Loop by reading one batch at a time until the file is exhausted.
-		while (auto opt_indices_batch = reader.readNextBatch(512)) {
-			torch::Tensor& indices = *opt_indices_batch;
+		openvdb::tree::ValueAccessor<openvdb::FloatTree> accessor(output_grid->tree());
 
-			torch::Tensor voxels = decodeIndices(indices);
+		while (auto opt = reader.readNextBatch(8192)) {
+			torch::Tensor indices = *opt;                         // [B, …]
+			torch::Tensor voxelsDevice = decodeIndices(indices);  // [B,1,D,H,W] on GPU/CPU
 
-			int current_batch_size = indices.size(0);
+			int B = indices.size(0);
+			// one-shot move to CPU-float
+			auto voxels = voxelsDevice.to(torch::kCPU, torch::kFloat32, /*non_blocking=*/true).contiguous();
+			const float* raw = voxels.data_ptr<float>();
 
-			size_t end_offset = std::min<size_t>(total_blocks + current_batch_size, reader.header.origins.size());
+			// slice out exactly B origins
+			int start = total_blocks;
+			int end = std::min(total_blocks + B, int(reader.header.origins.size()));
+			std::vector<openvdb::Coord> origins_slice(reader.header.origins.begin() + start, reader.header.origins.begin() + end);
 
-			std::vector<openvdb::Coord> origins_slice(reader.header.origins.begin() + total_blocks,
-			                                          reader.header.origins.begin() + end_offset);
-
-			writeVoxelsToGrid<GridType>(output_grid, origins_slice, voxels);
-
-			total_blocks += current_batch_size;
+			writeVoxelsToGrid<GridType>(accessor, origins_slice, raw, B);
+			total_blocks += B;
 		}
 
 		auto end_time = std::chrono::high_resolution_clock::now();
-		auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
-
-		std::cout << "Decoded " << total_blocks << " blocks in " << duration << " ms\n";
-		if (total_blocks > 0) {
-			std::cout << "Average: " << static_cast<double>(duration) / total_blocks << " ms per block\n";
+		auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
+		std::cout << "Decoded " << total_blocks << " blocks in " << ms << " ms\n";
+		if (total_blocks) {
+			std::cout << "Average " << double(ms * 1000) / total_blocks << " us/block\n";
 		}
 	}
 
    private:
-	torch::jit::Module model_;
-	torch::Tensor codebook_;
 	torch::Device device_;
+	torch::jit::Module model_;
+	torch::jit::Method decodeMethod_;
 };
 
 

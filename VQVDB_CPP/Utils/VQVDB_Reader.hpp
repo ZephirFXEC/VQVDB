@@ -29,6 +29,17 @@ class CompressedIndexReader {
 			throw std::runtime_error("Failed to open compressed file: " + filename);
 		}
 		readHeader();
+
+		// Cache elementsPerBlock_ and the tensor suffix [D,H,W,…]
+		elementsPerBlock_ = 1;
+		tensorShapeSuffix_.reserve(header.numDimensions);
+		for (auto d : header.shape) {
+			elementsPerBlock_ *= d;
+			tensorShapeSuffix_.push_back(static_cast<int64_t>(d));
+		}
+		if (elementsPerBlock_ == 0) {
+			throw std::runtime_error("Invalid block shape: contains a zero dimension");
+		}
 	}
 
 	// Reads the next batch of indices from the file.
@@ -38,4 +49,6 @@ class CompressedIndexReader {
    private:
 	void readHeader();
 	std::ifstream file_;
+	long long elementsPerBlock_;
+	std::vector<int64_t> tensorShapeSuffix_;
 };
