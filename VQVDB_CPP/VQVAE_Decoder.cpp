@@ -14,39 +14,11 @@
 #include <memory>
 #include <vector>
 
-#include "Utils/Kernel.cuh"
 #include "Utils/VQVDB_Reader.hpp"
 
 constexpr int BLOCK_DIM = 8;
 constexpr int BLOCK_VOXELS = BLOCK_DIM * BLOCK_DIM * BLOCK_DIM;
 
-
-// Host function to launch lookup kernel
-void lookupCodebook(const torch::Tensor& codebook, const torch::Tensor& indices, torch::Tensor& output) {
-	// Get tensor shapes and sizes
-	const int batch_size = indices.size(0);
-	const int depth = indices.size(1);
-	const int height = indices.size(2);
-	const int width = indices.size(3);
-	const int embedding_dim = codebook.size(1);
-	const int num_embeddings = codebook.size(0);
-
-	// Get raw pointers to tensor data
-	const float* codebook_ptr = codebook.data_ptr<float>();
-
-	const uint16_t* indices_ptr = reinterpret_cast<const uint16_t*>(indices.data_ptr<int>());
-	float* output_ptr = output.data_ptr<float>();
-
-	// Launch kernel via CUDA wrapper
-	lookupCodebook_launch(codebook_ptr, indices_ptr, output_ptr, batch_size, depth, height, width, embedding_dim, num_embeddings);
-
-	// Check for errors
-	cudaError_t err = cudaGetLastError();
-	if (err != cudaSuccess) {
-		std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
-		throw std::runtime_error("CUDA kernel launch failed");
-	}
-}
 
 template <typename GridType>
 void writeVoxelsToGrid(const openvdb::tree::ValueAccessor<openvdb::FloatTree>& grid, const std::vector<openvdb::Coord>& origins,
