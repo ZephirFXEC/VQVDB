@@ -1,35 +1,52 @@
-# VQVDB Compression Tools
+<h1 align="center">VQVDB: AI Compression for OpenVDB Grids </h1>
 
-This repository contains a prototype VQ-VAE based system for compressing OpenVDB
-leaf nodes.  Training utilities are provided in `VQVAE.py` and the runtime
-decoder is implemented in C++.
 
-## Encoding
+<div align="center">
+  <a> <img src="https://github.com/user-attachments/assets/5285b3b3-fa68-4710-a29f-ecba1a6d8acf"> </a>
+  <a> <img src="https://github.com/user-attachments/assets/2b410d95-019d-46eb-9970-0465d7deb7a7"> </a>
+</div>
+<br>
 
-The `VQVAE.py` script can train a model and compress a dataset of extracted
-leaf nodes.  When supplying an additional `--origins_file` pointing to a Numpy
-array of shape `(N,3)` with integer leaf coordinates, the encoder embeds these
-positions in the output `.vqvdb` file.
+# Oveview 
 
-Example:
+VQVDB is a deep learning–powered compressor for volumetric data stored in OpenVDB. 
+It uses Vector Quantized Variational Autoencoders (VQ-VAE) to learn a compact latent space and achieves up to 32× compression of float voxel grids, nearly lossless at the visual level.
 
-```bash
-python VQVAE.py --input_dir leaves/ --output_dir out/ \
-    --origins_file leaves_origins.npy
+VQVDB is designed for GPU-accelerated decoding via CUDA but also support CPU encoding / decoding, enabling real-time decompression of large volumes, with native support for integration into Houdini.
+
+## 📂 File Format
+
+Each `.vqvdb` file stores:
+
+| Section         | Description                              |
+|----------------|-------------------------------------------|
+| Header         | Magic, version, codebook size, shape info |
+| Codebook       | 256×128 float matrix                      |
+| Index Tensors  | [B × 8 × 8 × 8] uint8 values              |
+| Origins        | Per-leaf grid coordinates                 |
+
+---
+
+
+## 📈 Future Work
+
+- Hierarchical VQ-VAE (multi-res compression)
+- Residual VAE
+- Transformer-based latent upsampling
+- Real-time decompression via Vulkan compute
+- VDB segmentation / semantic-aware encoding
+
+---
+
+## 📜 Citation
+
+If you use VQVDB in academic work, please cite the project:
+
+```bibtex
+@misc{vqvdb2025,
+  title={VQVDB: VDB Compression using Vector Quantized Autoencoders},
+  author={Enzo Crema},
+  year={2025},
+  url={https://github.com/zephirfx/vqvdb}
+}
 ```
-
-The resulting file `compressed_indices.vqvdb` contains both the codebook indices
-and the leaf origins.
-
-## Decoding
-
-`vqvdb_decoder` reconstructs a new VDB grid using a trained model and the
-compressed file:
-
-```bash
-./vqvdb_decoder model.pt compressed_indices.vqvdb template.vdb output.vdb
-```
-
-The decoder no longer needs to derive leaf positions from the template grid;
-it reads them directly from the `.vqvdb` file.  The template VDB is only used
-for metadata such as grid transform, class and name.
