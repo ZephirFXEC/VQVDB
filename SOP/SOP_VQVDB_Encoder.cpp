@@ -88,7 +88,7 @@ void SOP_VQVDB_EncoderVerb::cook(const CookParms& cookparms) const {
 
 		VQVAEEncoder encoder("C:/Users/zphrfx/Desktop/hdk/VQVDB/models/vqvae_scripted.pt");
 
-		encoder.compress(grid, out_path);
+		encoder.compress(grid, out_path, batch_size);
 
 		cookparms.sopAddMessage(SOP_MESSAGE, ("Successfully saved to " + out_path).c_str());
 

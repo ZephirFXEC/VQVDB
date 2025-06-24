@@ -65,6 +65,7 @@ target_link_libraries(vqvdb_encoder PRIVATE
 # VQVDB_CPP interface library
 add_library(VQVDB_CPP STATIC
         VQVDB_CPP/VQVAE_Decoder.hpp VQVDB_CPP/VQVAE_Encoder.hpp VQVDB_CPP/VQVAE_Encoder.cpp VQVDB_CPP/VQVAE_Decoder.cpp
+        VQVDB_CPP/Utils/VQVDB_Reader.hpp VQVDB_CPP/Utils/VQVDB_Reader.cpp
         VQVDB_CPP/Utils/Utils.cpp
         VQVDB_CPP/Utils/Utils.hpp)
 target_include_directories(VQVDB_CPP PUBLIC
@@ -115,8 +116,8 @@ add_sop_library(SOP_VQVDB_Encoder
         "SOP/SOP_VQVDB_Encoder.hpp"
 )
 
-#[[
+
 add_sop_library(SOP_VQVDB_Decoder
         "SOP/SOP_VQVDB_Decoder.cpp"
         "SOP/SOP_VQVDB_Decoder.hpp"
-)]]
+)
