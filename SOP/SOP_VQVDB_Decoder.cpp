@@ -33,7 +33,7 @@ const char* const SOP_VQVDB_DecoderVerb::theDsFile = R"THEDSFILE(
         label   "GPU Batch Size"
         type    integer
         default { 64 }
-        range   { 1 1024 }
+        range   { 1 8192 }
     }
 }
 )THEDSFILE";
@@ -58,7 +58,7 @@ void SOP_VQVDB_DecoderVerb::cook(const CookParms& cookparms) const {
 		return;
 	}
 
-	const auto output_grid = openvdb::FloatGrid::create();
+	const openvdb::FloatGrid::Ptr output_grid = openvdb::FloatGrid::create();
 
 	try {
 		// --- Run Decoder ---
@@ -66,7 +66,7 @@ void SOP_VQVDB_DecoderVerb::cook(const CookParms& cookparms) const {
 
 		VQVAEDecoder decoder("C:/Users/zphrfx/Desktop/hdk/VQVDB/models/vqvae_scripted.pt");
 
-		decoder.decodeToGrid<openvdb::FloatGrid>(in_path.data(), output_grid);
+		decoder.decodeToGrid(in_path.data(), output_grid);
 	} catch (const std::exception& e) {
 		cookparms.sopAddError(SOP_MESSAGE, e.what());
 	}

@@ -34,12 +34,10 @@ class VQVAEDecoder {
 	torch::Tensor decodeIndices(const torch::Tensor& indices) const;
 
 
-	template <typename GridType>
-	void decodeToGrid(const std::string& compressed_file, const typename GridType::Ptr& output_grid);
+	void decodeToGrid(const std::string& compressed_file, const openvdb::FloatGrid::Ptr& output_grid) const;
 
-template <typename GridType>
-void writeVoxelsToGrid(const openvdb::tree::ValueAccessor<openvdb::FloatTree>& grid, const std::vector<openvdb::Coord>& origins,
-                       const float* __restrict__ raw, int B);
+	static void writeVoxelsToGrid(openvdb::tree::ValueAccessor<openvdb::FloatTree>& grid, const std::vector<openvdb::Coord>& origins,
+	                              const float* __restrict__ raw, int B);
 
 
    private:
