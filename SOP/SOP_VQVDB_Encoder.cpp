@@ -1,11 +1,10 @@
-#include <UT/UT_DSOVersion.h>
-
 #include "SOP_VQVDB_Encoder.hpp"
 
 #include <GU/GU_Detail.h>
+#include <UT/UT_DSOVersion.h>
 
 #include "Utils/Utils.hpp"
-#include "VQVDB_CPP/VQVAE_Encoder.hpp"
+#include "VQVDB/VQVAECodec.hpp"
 
 void newSopOperator(OP_OperatorTable* table) {
 	table->addOperator(new OP_Operator("vqvdb_encoder", "VQVDB Encoder", SOP_VQVDB_Encoder::myConstructor,
@@ -86,9 +85,9 @@ void SOP_VQVDB_EncoderVerb::cook(const CookParms& cookparms) const {
 		// --- Run Encoder ---
 		cookparms.sopAddMessage(SOP_MESSAGE, "Starting VQ-VDB encoding...");
 
-		VQVAEEncoder encoder("C:/Users/zphrfx/Desktop/hdk/VQVDB/models/vqvae_scripted.pt");
+		VQVAECodec codec("C:/Users/zphrfx/Desktop/hdk/VQVDB/models/vqvae_scripted.pt");
 
-		encoder.compress(grid, out_path, batch_size);
+		codec.compress(grid, out_path, batch_size);
 
 		cookparms.sopAddMessage(SOP_MESSAGE, ("Successfully saved to " + out_path).c_str());
 

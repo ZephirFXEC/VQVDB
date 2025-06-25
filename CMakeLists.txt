@@ -33,55 +33,19 @@ target_include_directories(HoudiniVDB INTERFACE
 # Add LibTorch to path
 list(APPEND CMAKE_PREFIX_PATH "libtorch")
 
-#[[add_executable(VQVAE_v2
-        VQVDB_CPP/VQVAE_v2.cpp
-        VQVDB_CPP/VQVAE_v2.hpp
-        VQVDB_CPP/VQVAE_Training.cpp)
-target_link_libraries(VQVAE_v2 PRIVATE
-        HoudiniVDB
-        ${TORCH_LIBRARIES}
-)]]
+# VQVDB interface library
+add_library(VQVDB STATIC
+        VQVDB/Utils/Utils.cpp
+        VQVDB/Utils/Utils.hpp
+        VQVDB/VQVAECodec.cpp
+        VQVDB/VQVAECodec.hpp)
 
-# Add decoder executable
-add_executable(vqvdb_decoder
-        VQVDB_CPP/VQVAE_Decoder.cpp
-        VQVDB_CPP/VQVAE_Decoder.hpp
-        VQVDB_CPP/Utils/VQVDB_Reader.cpp
-        VQVDB_CPP/Utils/VQVDB_Reader.hpp)
-
-target_include_directories(vqvdb_decoder PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(vqvdb_decoder PRIVATE
-        HoudiniVDB
-        ${TORCH_LIBRARIES}
+target_include_directories(VQVDB PUBLIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/VQVDB"
+        "${CMAKE_CURRENT_SOURCE_DIR}/VQVDB/Utils"
 )
 
-add_executable(vqvdb_encoder
-        VQVDB_CPP/VQVAE_Encoder.cpp
-        VQVDB_CPP/VQVAE_Encoder.hpp)
-target_include_directories(vqvdb_encoder PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(vqvdb_encoder PRIVATE
-        HoudiniVDB
-        ${TORCH_LIBRARIES}
-)
-
-
-# VQVDB_CPP interface library
-add_library(VQVDB_CPP STATIC
-        VQVDB_CPP/VQVAE_Decoder.cpp
-        VQVDB_CPP/VQVAE_Decoder.hpp
-        VQVDB_CPP/VQVAE_Encoder.cpp
-        VQVDB_CPP/VQVAE_Encoder.hpp
-        VQVDB_CPP/Utils/VQVDB_Reader.hpp
-        VQVDB_CPP/Utils/VQVDB_Reader.cpp
-        VQVDB_CPP/Utils/Utils.cpp
-        VQVDB_CPP/Utils/Utils.hpp)
-
-target_include_directories(VQVDB_CPP PUBLIC
-        "${CMAKE_CURRENT_SOURCE_DIR}/VQVDB_CPP"
-        "${CMAKE_CURRENT_SOURCE_DIR}/VQVDB_CPP/Utils"
-)
-
-target_link_libraries(VQVDB_CPP PUBLIC
+target_link_libraries(VQVDB PUBLIC
         HoudiniVDB
         ${TORCH_LIBRARIES}
 )
@@ -92,7 +56,7 @@ function(add_sop_library LIBNAME SRC_FILES)
 
     target_link_libraries(${LIBNAME} PRIVATE
             HoudiniVDB
-            VQVDB_CPP
+            VQVDB
             ${TORCH_LIBRARIES}
     )
 
