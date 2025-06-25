@@ -4,7 +4,7 @@
 #include <UT/UT_DSOVersion.h>
 
 #include "Utils/Utils.hpp"
-#include "VQVDB_CPP/VQVAE_Decoder.hpp"
+#include "VQVDB_CPP/VQVAECodec.hpp"
 
 void newSopOperator(OP_OperatorTable* table) {
 	table->addOperator(new OP_Operator("vqvdb_decoder", "VQVDB Decoder", SOP_VQVDB_Decoder::myConstructor,
@@ -57,16 +57,15 @@ void SOP_VQVDB_DecoderVerb::cook(const CookParms& cookparms) const {
 	if (in_path.empty()) {
 		return;
 	}
-
-	const openvdb::FloatGrid::Ptr output_grid = openvdb::FloatGrid::create();
+	openvdb::FloatGrid::Ptr output_grid = openvdb::FloatGrid::create();
 
 	try {
 		// --- Run Decoder ---
 		cookparms.sopAddMessage(SOP_MESSAGE, "Starting VQ-VDB decoding...");
 
-		VQVAEDecoder decoder("C:/Users/zphrfx/Desktop/hdk/VQVDB/models/vqvae_scripted.pt");
+		VQVAECodec decoder("C:/Users/zphrfx/Desktop/hdk/VQVDB/models/vqvae_scripted.pt");
 
-		decoder.decodeToGrid(in_path.data(), output_grid);
+		decoder.decompress(in_path.data(), output_grid, sopparms.getBatchsize());
 	} catch (const std::exception& e) {
 		cookparms.sopAddError(SOP_MESSAGE, e.what());
 	}

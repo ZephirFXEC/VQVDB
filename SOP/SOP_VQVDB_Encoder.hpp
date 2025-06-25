@@ -4,9 +4,9 @@
 
 #pragma once
 
-#include <PRM/PRM_TemplateBuilder.h>
 #include <SOP/SOP_Node.h>
 #include <SOP/SOP_NodeVerb.h>
+#include <PRM/PRM_TemplateBuilder.h>
 
 #include "SOP_VQVDB_Encoder.proto.h"
 

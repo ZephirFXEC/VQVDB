@@ -74,7 +74,9 @@ add_library(VQVDB_CPP STATIC
         VQVDB_CPP/Utils/VQVDB_Reader.hpp
         VQVDB_CPP/Utils/VQVDB_Reader.cpp
         VQVDB_CPP/Utils/Utils.cpp
-        VQVDB_CPP/Utils/Utils.hpp)
+        VQVDB_CPP/Utils/Utils.hpp
+        VQVDB_CPP/VQVAECodec.cpp
+        VQVDB_CPP/VQVAECodec.hpp)
 
 target_include_directories(VQVDB_CPP PUBLIC
         "${CMAKE_CURRENT_SOURCE_DIR}/VQVDB_CPP"
