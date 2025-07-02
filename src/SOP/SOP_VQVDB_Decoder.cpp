@@ -4,7 +4,7 @@
 #include <UT/UT_DSOVersion.h>
 
 #include "Utils/Utils.hpp"
-#include "VQVDB/VQVAECodec.hpp"
+#include "VQVAECodec.hpp"
 
 void newSopOperator(OP_OperatorTable* table) {
 	table->addOperator(new OP_Operator("vqvdb_decoder", "VQVDB Decoder", SOP_VQVDB_Decoder::myConstructor,

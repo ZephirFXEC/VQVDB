@@ -286,7 +286,7 @@ class VQVAE(nn.Module):
 def train(args):
     # Hyperparameters
     BATCH_SIZE = 8192*2
-    EPOCHS = 500
+    EPOCHS = 1000
     LR = 5e-4
     IN_CHANNELS = 1
     EMBEDDING_DIM = 128  # The dimensionality of the embeddings
@@ -308,10 +308,10 @@ def train(args):
     print(f"Dataset created with {len(vdb_dataset)} total blocks.")
 
     # keep 10% of the dataset for validation
-    split_idx = int(len(vdb_dataset) * 0.9)
+    split_idx = int(len(vdb_dataset) * 0.6)
 
     vdb_dataset_train = torch.utils.data.Subset(vdb_dataset, range(split_idx))
-    vdb_dataset_val = torch.utils.data.Subset(vdb_dataset, range(split_idx, len(vdb_dataset)))
+    vdb_dataset_val = torch.utils.data.Subset(vdb_dataset, range(split_idx//4))
     print(f"Training dataset size: {len(vdb_dataset_train)}")
     print(f"Validation dataset size: {len(vdb_dataset_val)}")
 
@@ -321,7 +321,7 @@ def train(args):
     train_loader = DataLoader(
         vdb_dataset_train,
         batch_size=BATCH_SIZE,
-        shuffle=True,
+        shuffle=True,   
         num_workers=8,
         pin_memory=True,
         persistent_workers=True,
@@ -340,6 +340,10 @@ def train(args):
     best_val_loss = float('inf')
     global_step = 0  # NEW: Initialize a global step counter
     
+
+    recon_loss_l = []  # List to store reconstruction losses
+    vq_loss_l = []  # List to store VQ losses
+    perplexity_l = []  # List to store perplexity values
 
     for epoch in range(EPOCHS):
         model.train()
@@ -381,7 +385,7 @@ def train(args):
                 # We pass `z` to the function. Use .detach() as this is a manual, non-gradient operation.
                 model.check_and_reset_dead_codes(z)
             
-            global_step += 1 # NEW: Increment the step counter
+        global_step += 1 # NEW: Increment the step counter
 
         # Validation phase
         model.eval()
@@ -402,8 +406,11 @@ def train(args):
         # Save best model
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
-            torch.save(model.state_dict(), args.model_path)
-            print(f"\nBest model saved at epoch {epoch + 1} with validation loss {best_val_loss:.4f}")
+            state = {'epoch': epoch + 1, 'state_dict': model.state_dict(),
+                    'optimizer': optimizer.state_dict(), 'scheduler': scheduler.state_dict(), "recon_loss_l": recon_loss_l,
+                    "vq_loss_l": vq_loss_l, "perplexity_l": perplexity_l}
+            os.makedirs(os.path.dirname(args.model_path), exist_ok=True)
+            torch.save(state, args.model_path)
             
         print(f"\nEpoch {epoch + 1}/{EPOCHS}, "
             f"Train Recon Loss: {avg_train_recon_loss:.4f}, "
@@ -411,11 +418,22 @@ def train(args):
             f"Val Loss: {avg_val_loss:.4f}, "
             f"Perplexity: {last_perplexity:.2f}")
 
-    print("Training finished.")
-    os.makedirs(os.path.dirname(args.model_path), exist_ok=True)
-    torch.save(model.state_dict(), args.model_path)
-    print("Final Model saved successfully.")
 
+        # NEW: Append losses and perplexity to lists
+        recon_loss_l.append(avg_train_recon_loss)
+        vq_loss_l.append(avg_train_vq_loss)
+        perplexity_l.append(last_perplexity)
+    
+
+    
+    state = {'epoch': epoch + 1, 'state_dict': model.state_dict(),
+            'optimizer': optimizer.state_dict(), 'scheduler': scheduler.state_dict(), "recon_loss_l": recon_loss_l,
+            "vq_loss_l": vq_loss_l, "perplexity_l": perplexity_l}
+    os.makedirs(os.path.dirname(args.model_path), exist_ok=True)
+    torch.save(state, args.model_path)
+
+
+    print("Final Model saved successfully.")
     # Save JIT script for inference
     scripted_model = torch.jit.script(model)
     scripted_model.save(args.model_path.replace('.pth', '_scripted.pt'))

@@ -35,14 +35,16 @@ list(APPEND CMAKE_PREFIX_PATH "libtorch")
 
 # VQVDB interface library
 add_library(VQVDB STATIC
-        VQVDB/Utils/Utils.cpp
-        VQVDB/Utils/Utils.hpp
-        VQVDB/VQVAECodec.cpp
-        VQVDB/VQVAECodec.hpp)
+        src/VQVDB/Utils/Utils.cpp
+        src/VQVDB/Utils/Utils.hpp
+        src/VQVDB/Utils/VQVDB_Reader.cpp
+        src/VQVDB/Utils/VQVDB_Reader.hpp
+        src/VQVDB/VQVAECodec.cpp
+        src/VQVDB/VQVAECodec.hpp)
 
 target_include_directories(VQVDB PUBLIC
-        "${CMAKE_CURRENT_SOURCE_DIR}/VQVDB"
-        "${CMAKE_CURRENT_SOURCE_DIR}/VQVDB/Utils"
+        "src/VQVDB"
+        "src/VQVDB/Utils"
 )
 
 target_link_libraries(VQVDB PUBLIC
@@ -78,18 +80,18 @@ endfunction()
 
 # ------- Generate Houdini protocol headers -------
 houdini_generate_proto_headers(FILES
-        "SOP/SOP_VQVDB_Encoder.cpp"
-        "SOP/SOP_VQVDB_Decoder.cpp"
+        "src/SOP/SOP_VQVDB_Encoder.cpp"
+        "src/SOP/SOP_VQVDB_Decoder.cpp"
 )
 
 # ------- Create SOP libraries -------
 add_sop_library(SOP_VQVDB_Encoder
-        "SOP/SOP_VQVDB_Encoder.cpp"
-        "SOP/SOP_VQVDB_Encoder.hpp"
+        "src/SOP/SOP_VQVDB_Encoder.cpp"
+        "src/SOP/SOP_VQVDB_Encoder.hpp"
 )
 
 
 add_sop_library(SOP_VQVDB_Decoder
-        "SOP/SOP_VQVDB_Decoder.cpp"
-        "SOP/SOP_VQVDB_Decoder.hpp"
+        "src/SOP/SOP_VQVDB_Decoder.cpp"
+        "src/SOP/SOP_VQVDB_Decoder.hpp"
 )

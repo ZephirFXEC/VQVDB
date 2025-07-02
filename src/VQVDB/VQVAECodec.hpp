@@ -73,12 +73,3 @@ class VQVAECodec {
 	torch::jit::Method encodeMethod_;
 	torch::jit::Method decodeMethod_;
 };
-
-
-// =========================================================================================
-// Helper Streamer for Reading .vqvdb Files (for Decompression)
-// =========================================================================================
-struct EncodedBatch {
-	torch::Tensor data;
-	std::vector<openvdb::Coord> origins;
-};
