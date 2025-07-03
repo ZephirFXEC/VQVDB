@@ -80,10 +80,12 @@ Each `.vqvdb` file stores:
 If you use VQVDB in academic work, please cite the project:
 
 ```bibtex
-@misc{vqvdb2025,
-  title={VQVDB: VDB Compression using Vector Quantized Autoencoders},
-  author={Enzo Crema},
-  year={2025},
-  url={https://github.com/zephirfx/vqvdb}
+@article{Crema2025,
+author = "Enzo Crema",
+title = "{VQVDB : VDB Compression using VQ-VAEs}",
+year = "2025",
+month = "7",
+url = "https://figshare.com/articles/dataset/VQVDB_VDB_Compression_using_VQ-VAEs/29469083",
+doi = "10.6084/m9.figshare.29469083.v1"
 }
 ```
