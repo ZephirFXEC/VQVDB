@@ -1,5 +1,4 @@
-<h1 align="center">VQVDB: AI Compression for OpenVDB Grids </h1>
-
+<h1 align="center"> <a href=https://doi.org/10.6084/m9.figshare.29469083.v1> VQVDB: AI Compression for OpenVDB Grids </a> </h1>
 
 <div align="center">
   <a> <img src="https://github.com/user-attachments/assets/5285b3b3-fa68-4710-a29f-ecba1a6d8acf"> </a>
