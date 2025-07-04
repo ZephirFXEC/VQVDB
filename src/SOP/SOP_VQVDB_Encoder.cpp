@@ -85,7 +85,7 @@ void SOP_VQVDB_EncoderVerb::cook(const CookParms& cookparms) const {
 		// --- Run Encoder ---
 		cookparms.sopAddMessage(SOP_MESSAGE, "Starting VQ-VDB encoding...");
 
-		VQVAECodec codec("C:/Users/zphrfx/Desktop/hdk/VQVDB/models/vqvae_scripted.pt");
+		const VQVAECodec codec{};
 
 		codec.compress(grid, out_path, batch_size);
 

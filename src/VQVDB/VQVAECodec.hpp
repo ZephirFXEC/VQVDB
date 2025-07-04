@@ -23,9 +23,8 @@ class VQVAECodec {
    public:
 	/**
 	 * @brief Constructs the VQVAECodec.
-	 * @param modelPath Path to the TorchScript model file (.pt). The model must have 'encode' and 'decode' methods.
 	 */
-	explicit VQVAECodec(const std::string& modelPath);
+	explicit VQVAECodec();
 
 	/**
 	 * @brief Compresses an OpenVDB FloatGrid into a .vqvdb file.
@@ -69,6 +68,10 @@ class VQVAECodec {
 	torch::Tensor decodeBatch(const torch::Tensor& cpuBatch) const;
 
 	torch::Device device_;
+
+	static std::tuple<torch::jit::Module, torch::jit::Method, torch::jit::Method> load_embedded_model(const torch::Device& device);
+	std::tuple<torch::jit::Module, torch::jit::Method, torch::jit::Method> model_parts_;
+
 	torch::jit::Module model_;
 	torch::jit::Method encodeMethod_;
 	torch::jit::Method decodeMethod_;

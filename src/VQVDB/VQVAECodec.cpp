@@ -18,6 +18,8 @@
 constexpr uint8_t LEAF_DIM = 8;
 constexpr uint16_t LEAF_VOXELS = LEAF_DIM * LEAF_DIM * LEAF_DIM;  // 512
 
+#include "bin_model.h"
+
 // =========================================================================================
 // Helper Streamer for Reading VDB Leaf Blocks (for Compression)
 // =========================================================================================
@@ -41,14 +43,15 @@ class VDBInputBlockStreamer {
 		std::vector<openvdb::Coord> origins(B);
 
 		float* dstBase = batch.data_ptr<float>();
-		for (size_t i = 0; i < B; ++i) {
-			// The order is implicitly guaranteed by iterating sequentially from index 0
-			const auto& leaf = leafManager_.leaf(start + i);
-			origins[i] = leaf.origin();  // Also get origin in parallel
-			const float* src = leaf.buffer().data();
-			float* dst = dstBase + i * LEAF_VOXELS;
-			std::memcpy(dst, src, LEAF_VOXELS * sizeof(float));
-		}
+		tbb::parallel_for(tbb::blocked_range<size_t>(0, B), [&](const tbb::blocked_range<size_t>& r) {
+			for (size_t i = r.begin(); i != r.end(); ++i) {
+				const auto& leaf = leafManager_.leaf(start + i);
+				origins[i] = leaf.origin();
+				const float* src = leaf.buffer().data();
+				float* dst = dstBase + i * LEAF_VOXELS;
+				std::memcpy(dst, src, LEAF_VOXELS * sizeof(float));
+			}
+		});
 
 		return {batch.unsqueeze(1), origins};  // Add channel dim: [B, 1, D, D, D]
 	}
@@ -64,15 +67,40 @@ class VDBInputBlockStreamer {
 // VQVAECodec Method Implementations
 // =========================================================================================
 
-VQVAECodec::VQVAECodec(const std::string& modelPath)
-    : device_(torch::cuda::is_available() ? torch::kCUDA : torch::kCPU),
-      model_(torch::jit::load(modelPath)),
-      encodeMethod_(model_.get_method("encode")),
-      decodeMethod_(model_.get_method("decode")) {
-	std::cout << "Using device: " << device_ << '\n';
-	model_.eval();
-	model_.to(device_, torch::kFloat32, /*non_blocking=*/false);  // Wait for model to be ready
+// --- Implementation of the private static helper function ---
+std::tuple<torch::jit::Module, torch::jit::Method, torch::jit::Method> VQVAECodec::load_embedded_model(const torch::Device& device) {
+	// Create a string stream from the embedded byte array
+	std::string model_string(reinterpret_cast<const char*>(g_model_data), g_model_data_size);
+	std::istringstream stream(model_string);
+
+	torch::jit::Module module;
+	try {
+		// Load the model from the stream (onto CPU by default)
+		module = torch::jit::load(stream);
+	} catch (const c10::Error& e) {
+		throw std::runtime_error("Failed to load TorchScript model from memory: " + std::string(e.what()));
+	}
+
+	// Move the loaded module to the target device
+	module.to(device);
+	module.eval();
+
+	// Get the methods from the now-configured module
+	torch::jit::Method encode_method = module.get_method("encode");
+	torch::jit::Method decode_method = module.get_method("decode");
+
+	std::cout << "VQVAECodec: Model successfully loaded from memory onto device: " << device << '\n';
+
+	// Return all the constructed objects in a tuple
+	return {std::move(module), std::move(encode_method), std::move(decode_method)};
 }
+
+VQVAECodec::VQVAECodec()
+    : device_(torch::cuda::is_available() ? torch::kCUDA : torch::kCPU),
+      model_parts_(load_embedded_model(device_)),
+      model_(std::get<0>(model_parts_)),
+      encodeMethod_(std::get<1>(model_parts_)),
+      decodeMethod_(std::get<2>(model_parts_)) {}
 
 void VQVAECodec::compress(const openvdb::FloatGrid::Ptr& grid, const std::string& outPath, const size_t batchSize) const {
 	const auto t0 = std::chrono::high_resolution_clock::now();
@@ -135,7 +163,7 @@ void VQVAECodec::decompress(const std::string& inPath, openvdb::FloatGrid::Ptr& 
 
 	// --- Step 2: Prepare the output grid ---
 	grid = openvdb::FloatGrid::create();
-	auto accessor = grid->getAccessor();  // Accessor is not needed if we use touchLeaf
+	auto accessor = grid->getAccessor();
 
 	// --- Step 3: Stream, decode, and write data to the new grid ---
 	const auto t1 = std::chrono::high_resolution_clock::now();
@@ -153,7 +181,7 @@ void VQVAECodec::decompress(const std::string& inPath, openvdb::FloatGrid::Ptr& 
 			const openvdb::Coord& origin = batch.origins[i];
 
 			// This creates the leaf in the tree if it doesn't exist.
-			if (auto* leaf = grid->tree().touchLeaf(origin)) {
+			if (auto* leaf = accessor.touchLeaf(origin)) {
 				const float* src = dataPtr + i * LEAF_VOXELS;
 				std::memcpy(leaf->buffer().data(), src, LEAF_VOXELS * sizeof(float));
 				leaf->setValuesOn();

@@ -63,7 +63,7 @@ void SOP_VQVDB_DecoderVerb::cook(const CookParms& cookparms) const {
 		// --- Run Decoder ---
 		cookparms.sopAddMessage(SOP_MESSAGE, "Starting VQ-VDB decoding...");
 
-		VQVAECodec decoder("C:/Users/zphrfx/Desktop/hdk/VQVDB/models/vqvae_scripted.pt");
+		const VQVAECodec decoder{};
 
 		decoder.decompress(in_path.data(), output_grid, sopparms.getBatchsize());
 	} catch (const std::exception& e) {
