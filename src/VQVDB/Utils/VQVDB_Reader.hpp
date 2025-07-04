@@ -12,8 +12,6 @@ struct VQVDBHeader {
 	uint8_t version = 2;
 	uint32_t numEmbeddings = 0;
 	uint8_t latentDimCount = 0;
-	// Followed immediately by latentShape[latentDimCount]
-	// Followed immediately by totalBlockCount
 };
 #pragma pack(pop)
 

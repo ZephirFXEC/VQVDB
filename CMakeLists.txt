@@ -40,7 +40,8 @@ add_library(VQVDB STATIC
         src/VQVDB/Utils/VQVDB_Reader.cpp
         src/VQVDB/Utils/VQVDB_Reader.hpp
         src/VQVDB/VQVAECodec.cpp
-        src/VQVDB/VQVAECodec.hpp)
+        src/VQVDB/VQVAECodec.hpp
+        src/VQVDB/Utils/Profiler.hpp)
 
 target_include_directories(VQVDB PUBLIC
         "src/VQVDB"
