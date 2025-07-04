@@ -11,14 +11,122 @@
 #include <chrono>
 #include <iostream>
 #include <vector>
+#include <cuda_runtime.h>
 
 #include "VQVDB_Reader.hpp"
+#include "PerformanceProfiler.hpp"
 
 // Constants for VDB leaf nodes. A leaf is a dense 8x8x8 grid of voxels.
 constexpr uint8_t LEAF_DIM = 8;
 constexpr uint16_t LEAF_VOXELS = LEAF_DIM * LEAF_DIM * LEAF_DIM;  // 512
 
 #include "bin_model.h"
+
+// =========================================================================================
+// Performance Optimization Component Implementations  
+// =========================================================================================
+
+GPUMemoryPool::GPUMemoryPool(const torch::Device& device) : device_(device) {}
+
+torch::Tensor GPUMemoryPool::getTensor(const std::vector<int64_t>& shape, torch::ScalarType dtype) {
+    TensorKey key{shape, dtype};
+    auto& cache = tensorCache_[key];
+    
+    if (!cache.empty()) {
+        torch::Tensor tensor = cache.back();
+        cache.pop_back();
+        return tensor;
+    }
+    
+    // Create new tensor if none available in cache
+    auto opts = torch::TensorOptions().dtype(dtype).device(device_);
+    return torch::empty(shape, opts);
+}
+
+void GPUMemoryPool::returnTensor(torch::Tensor tensor) {
+    if (!tensor.defined() || tensor.device() != device_) return;
+    
+    TensorKey key{tensor.sizes().vec(), tensor.scalar_type()};
+    tensorCache_[key].push_back(tensor);
+}
+
+void GPUMemoryPool::clear() {
+    tensorCache_.clear();
+}
+
+size_t GPUMemoryPool::TensorKeyHash::operator()(const TensorKey& key) const {
+    size_t hash = std::hash<int>{}(static_cast<int>(key.dtype));
+    for (int64_t dim : key.shape) {
+        hash ^= std::hash<int64_t>{}(dim) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+    }
+    return hash;
+}
+
+StreamManager::StreamManager(const torch::Device& device) 
+    : device_(device), h2dStreamIndex_(0), d2hStreamIndex_(0) {
+    if (device_.is_cuda()) {
+        // Create multiple streams for overlapping transfers
+        h2dStreams_.resize(2);
+        d2hStreams_.resize(2);
+        
+        for (size_t i = 0; i < 2; ++i) {
+            cudaStream_t stream;
+            cudaStreamCreate(&stream);
+            h2dStreams_[i] = stream;
+            
+            cudaStreamCreate(&stream);  
+            d2hStreams_[i] = stream;
+        }
+        
+        cudaStream_t computeStream;
+        cudaStreamCreate(&computeStream);
+        computeStream_ = computeStream;
+    }
+}
+
+StreamManager::~StreamManager() {
+    if (device_.is_cuda()) {
+        for (void* stream : h2dStreams_) {
+            cudaStreamDestroy(static_cast<cudaStream_t>(stream));
+        }
+        for (void* stream : d2hStreams_) {
+            cudaStreamDestroy(static_cast<cudaStream_t>(stream));
+        }
+        if (computeStream_) {
+            cudaStreamDestroy(static_cast<cudaStream_t>(computeStream_));
+        }
+    }
+}
+
+void* StreamManager::getH2DStream() {
+    if (!device_.is_cuda()) return nullptr;
+    void* stream = h2dStreams_[h2dStreamIndex_];
+    h2dStreamIndex_ = (h2dStreamIndex_ + 1) % h2dStreams_.size();
+    return stream;
+}
+
+void* StreamManager::getD2HStream() {
+    if (!device_.is_cuda()) return nullptr;
+    void* stream = d2hStreams_[d2hStreamIndex_];
+    d2hStreamIndex_ = (d2hStreamIndex_ + 1) % d2hStreams_.size();
+    return stream;
+}
+
+void* StreamManager::getComputeStream() {
+    return device_.is_cuda() ? computeStream_ : nullptr;
+}
+
+void StreamManager::synchronizeAll() {
+    if (device_.is_cuda()) {
+        for (void* stream : h2dStreams_) {
+            cudaStreamSynchronize(static_cast<cudaStream_t>(stream));
+        }
+        for (void* stream : d2hStreams_) {
+            cudaStreamSynchronize(static_cast<cudaStream_t>(stream));
+        }
+        cudaStreamSynchronize(static_cast<cudaStream_t>(computeStream_));
+    }
+}
 
 // =========================================================================================
 // Helper Streamer for Reading VDB Leaf Blocks (for Compression)
@@ -37,9 +145,9 @@ class VDBInputBlockStreamer {
 		currentPos_ = end;
 		const size_t B = end - start;
 
-		// Use pinned memory for asynchronous H2D copy later
+		// OPTIMIZATION: Create tensor with channel dimension upfront to avoid unsqueeze copy
 		auto opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU).pinned_memory(true);
-		torch::Tensor batch = torch::empty({static_cast<long>(B), LEAF_DIM, LEAF_DIM, LEAF_DIM}, opts);
+		torch::Tensor batch = torch::empty({static_cast<long>(B), 1, LEAF_DIM, LEAF_DIM, LEAF_DIM}, opts);
 		std::vector<openvdb::Coord> origins(B);
 
 		float* dstBase = batch.data_ptr<float>();
@@ -48,12 +156,13 @@ class VDBInputBlockStreamer {
 				const auto& leaf = leafManager_.leaf(start + i);
 				origins[i] = leaf.origin();
 				const float* src = leaf.buffer().data();
+				// Direct copy to the correct position in 5D tensor (skip channel dim offset)
 				float* dst = dstBase + i * LEAF_VOXELS;
 				std::memcpy(dst, src, LEAF_VOXELS * sizeof(float));
 			}
 		});
 
-		return {batch.unsqueeze(1), origins};  // Add channel dim: [B, 1, D, D, D]
+		return {batch, origins};  // Already has channel dim: [B, 1, D, D, D]
 	}
 
    private:
@@ -100,7 +209,9 @@ VQVAECodec::VQVAECodec()
       model_parts_(load_embedded_model(device_)),
       model_(std::get<0>(model_parts_)),
       encodeMethod_(std::get<1>(model_parts_)),
-      decodeMethod_(std::get<2>(model_parts_)) {}
+      decodeMethod_(std::get<2>(model_parts_)),
+      memoryPool_(std::make_unique<GPUMemoryPool>(device_)),
+      streamManager_(std::make_unique<StreamManager>(device_)) {}
 
 void VQVAECodec::compress(const openvdb::FloatGrid::Ptr& grid, const std::string& outPath, const size_t batchSize) const {
 	const auto t0 = std::chrono::high_resolution_clock::now();
@@ -150,6 +261,9 @@ void VQVAECodec::compress(const openvdb::FloatGrid::Ptr& grid, const std::string
 	const auto setup = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
 	const auto comp = std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count();
 	printf("\n-- Setup  : %lld ms\n-- Encode : %lld ms\n", setup, comp);
+	
+	// Print detailed performance report
+	PerformanceProfiler::getInstance().printReport();
 }
 
 
@@ -197,18 +311,111 @@ void VQVAECodec::decompress(const std::string& inPath, openvdb::FloatGrid::Ptr& 
 	const auto setup = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
 	const auto decomp = std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count();
 	printf("\n-- Setup  : %lld ms\n-- Decode : %lld ms\n", setup, decomp);
+	
+	// Print detailed performance report
+	PerformanceProfiler::getInstance().printReport();
 }
 
 torch::Tensor VQVAECodec::encodeBatch(const torch::Tensor& cpuBatch) const {
+	PROFILE_SCOPE("VQVAECodec::encodeBatch");
 	torch::NoGradGuard nograd;
-	torch::Tensor gpuTensor = cpuBatch.to(device_, /*non_blocking=*/true);
+	
+	// Get reusable GPU tensor from memory pool
+	PROFILE_START("encode_memory_pool");
+	auto gpuTensorShape = cpuBatch.sizes().vec();
+	torch::Tensor gpuTensor = memoryPool_->getTensor(gpuTensorShape, torch::kFloat32);
+	PROFILE_END("encode_memory_pool");
+	
+	// Use optimized copy if CUDA is available
+	PROFILE_START("encode_h2d_transfer");
+	if (device_.is_cuda()) {
+		// Asynchronous H2D transfer using dedicated stream
+		auto h2dStream = static_cast<cudaStream_t>(streamManager_->getH2DStream());
+		gpuTensor.copy_(cpuBatch, /*non_blocking=*/true);
+		
+		// Synchronize H2D transfer before computation
+		cudaStreamSynchronize(h2dStream);
+	} else {
+		gpuTensor.copy_(cpuBatch);
+	}
+	PROFILE_END("encode_h2d_transfer");
+	
+	// Perform encoding on compute stream
+	PROFILE_START("encode_computation");
 	const torch::Tensor result = encodeMethod_({gpuTensor}).toTensor();
-	return result.to(torch::kCPU, torch::kU8);
+	
+	// Convert to uint8 on GPU to avoid redundant transfers
+	torch::Tensor gpuResult = result.to(torch::kU8);
+	PROFILE_END("encode_computation");
+	
+	// Create output tensor with pinned memory for faster D2H transfer
+	PROFILE_START("encode_d2h_transfer");
+	auto opts = torch::TensorOptions().dtype(torch::kU8).device(torch::kCPU).pinned_memory(device_.is_cuda());
+	torch::Tensor cpuResult = torch::empty(gpuResult.sizes(), opts);
+	
+	// Asynchronous D2H transfer
+	if (device_.is_cuda()) {
+		auto d2hStream = static_cast<cudaStream_t>(streamManager_->getD2HStream());
+		cpuResult.copy_(gpuResult, /*non_blocking=*/true);
+		cudaStreamSynchronize(d2hStream);
+	} else {
+		cpuResult.copy_(gpuResult);
+	}
+	PROFILE_END("encode_d2h_transfer");
+	
+	// Return tensors to memory pool for reuse
+	memoryPool_->returnTensor(gpuTensor);
+	
+	return cpuResult;
 }
 
 torch::Tensor VQVAECodec::decodeBatch(const torch::Tensor& cpuBatch) const {
+	PROFILE_SCOPE("VQVAECodec::decodeBatch");
 	torch::NoGradGuard nograd;
-	torch::Tensor gpuTensor = cpuBatch.to(device_, torch::kLong, /*non_blocking=*/true);
-	const torch::Tensor result = decodeMethod_({gpuTensor}).toTensor();
-	return result.to(torch::kCPU, torch::kFloat32);
+	
+	// Optimize: Skip unnecessary uint8 -> int64 conversion
+	// Convert directly to float on GPU if the model supports it
+	PROFILE_START("decode_memory_pool");
+	auto gpuTensorShape = cpuBatch.sizes().vec();
+	torch::Tensor gpuTensor = memoryPool_->getTensor(gpuTensorShape, torch::kU8);
+	PROFILE_END("decode_memory_pool");
+	
+	// Asynchronous H2D transfer
+	PROFILE_START("decode_h2d_transfer");
+	if (device_.is_cuda()) {
+		auto h2dStream = static_cast<cudaStream_t>(streamManager_->getH2DStream());
+		gpuTensor.copy_(cpuBatch, /*non_blocking=*/true);
+		cudaStreamSynchronize(h2dStream);
+	} else {
+		gpuTensor.copy_(cpuBatch);
+	}
+	PROFILE_END("decode_h2d_transfer");
+	
+	// Convert to long only if necessary for the model
+	PROFILE_START("decode_computation");
+	torch::Tensor gpuLongTensor = gpuTensor.to(torch::kLong);
+	
+	// Perform decoding
+	const torch::Tensor result = decodeMethod_({gpuLongTensor}).toTensor();
+	PROFILE_END("decode_computation");
+	
+	// Create output tensor with pinned memory
+	PROFILE_START("decode_d2h_transfer");
+	auto opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU).pinned_memory(device_.is_cuda());
+	torch::Tensor cpuResult = torch::empty(result.sizes(), opts);
+	
+	// Asynchronous D2H transfer
+	if (device_.is_cuda()) {
+		auto d2hStream = static_cast<cudaStream_t>(streamManager_->getD2HStream());
+		cpuResult.copy_(result, /*non_blocking=*/true);
+		cudaStreamSynchronize(d2hStream);
+	} else {
+		cpuResult.copy_(result);
+	}
+	PROFILE_END("decode_d2h_transfer");
+	
+	// Return tensors to memory pool
+	memoryPool_->returnTensor(gpuTensor);
+	
+	return cpuResult;
 }

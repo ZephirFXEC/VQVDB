@@ -39,6 +39,7 @@ add_library(VQVDB STATIC
         src/VQVDB/Utils/Utils.hpp
         src/VQVDB/Utils/VQVDB_Reader.cpp
         src/VQVDB/Utils/VQVDB_Reader.hpp
+        src/VQVDB/Utils/PerformanceProfiler.hpp
         src/VQVDB/VQVAECodec.cpp
         src/VQVDB/VQVAECodec.hpp)
 
