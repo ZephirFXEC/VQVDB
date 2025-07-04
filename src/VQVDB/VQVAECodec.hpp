@@ -34,6 +34,9 @@ public:
     
     // Clear all cached tensors
     void clear();
+    
+    // Pre-warm the cache with commonly used tensor sizes
+    void warmup(const std::vector<std::pair<std::vector<int64_t>, torch::ScalarType>>& commonShapes);
 
 private:
     struct TensorKey {
@@ -97,6 +100,11 @@ class VQVAECodec {
 	 * @brief Constructs the VQVAECodec.
 	 */
 	explicit VQVAECodec();
+	
+	/**
+	 * @brief Destructor - cleans up GPU resources
+	 */
+	~VQVAECodec();
 
 	/**
 	 * @brief Compresses an OpenVDB FloatGrid into a .vqvdb file.

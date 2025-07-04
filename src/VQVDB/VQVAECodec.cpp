@@ -23,6 +23,15 @@ constexpr uint16_t LEAF_VOXELS = LEAF_DIM * LEAF_DIM * LEAF_DIM;  // 512
 #include "bin_model.h"
 
 // =========================================================================================
+// CUDA Error Checking Utility
+// =========================================================================================
+inline void checkCudaError(cudaError_t error, const char* message) {
+    if (error != cudaSuccess) {
+        throw std::runtime_error(std::string(message) + ": " + cudaGetErrorString(error));
+    }
+}
+
+// =========================================================================================
 // Performance Optimization Component Implementations  
 // =========================================================================================
 
@@ -54,6 +63,17 @@ void GPUMemoryPool::clear() {
     tensorCache_.clear();
 }
 
+void GPUMemoryPool::warmup(const std::vector<std::pair<std::vector<int64_t>, torch::ScalarType>>& commonShapes) {
+    for (const auto& [shape, dtype] : commonShapes) {
+        // Pre-allocate a few tensors of each common size
+        for (int i = 0; i < 3; ++i) {
+            auto opts = torch::TensorOptions().dtype(dtype).device(device_);
+            torch::Tensor tensor = torch::empty(shape, opts);
+            returnTensor(tensor);
+        }
+    }
+}
+
 size_t GPUMemoryPool::TensorKeyHash::operator()(const TensorKey& key) const {
     size_t hash = std::hash<int>{}(static_cast<int>(key.dtype));
     for (int64_t dim : key.shape) {
@@ -71,15 +91,21 @@ StreamManager::StreamManager(const torch::Device& device)
         
         for (size_t i = 0; i < 2; ++i) {
             cudaStream_t stream;
-            cudaStreamCreate(&stream);
+            if (cudaStreamCreate(&stream) != cudaSuccess) {
+                throw std::runtime_error("Failed to create H2D CUDA stream");
+            }
             h2dStreams_[i] = stream;
             
-            cudaStreamCreate(&stream);  
+            if (cudaStreamCreate(&stream) != cudaSuccess) {
+                throw std::runtime_error("Failed to create D2H CUDA stream");
+            }
             d2hStreams_[i] = stream;
         }
         
         cudaStream_t computeStream;
-        cudaStreamCreate(&computeStream);
+        if (cudaStreamCreate(&computeStream) != cudaSuccess) {
+            throw std::runtime_error("Failed to create compute CUDA stream");
+        }
         computeStream_ = computeStream;
     }
 }
@@ -119,12 +145,15 @@ void* StreamManager::getComputeStream() {
 void StreamManager::synchronizeAll() {
     if (device_.is_cuda()) {
         for (void* stream : h2dStreams_) {
-            cudaStreamSynchronize(static_cast<cudaStream_t>(stream));
+            checkCudaError(cudaStreamSynchronize(static_cast<cudaStream_t>(stream)), 
+                         "H2D stream synchronization failed");
         }
         for (void* stream : d2hStreams_) {
-            cudaStreamSynchronize(static_cast<cudaStream_t>(stream));
+            checkCudaError(cudaStreamSynchronize(static_cast<cudaStream_t>(stream)), 
+                         "D2H stream synchronization failed");
         }
-        cudaStreamSynchronize(static_cast<cudaStream_t>(computeStream_));
+        checkCudaError(cudaStreamSynchronize(static_cast<cudaStream_t>(computeStream_)), 
+                     "Compute stream synchronization failed");
     }
 }
 
@@ -156,6 +185,13 @@ class VDBInputBlockStreamer {
 				const auto& leaf = leafManager_.leaf(start + i);
 				origins[i] = leaf.origin();
 				const float* src = leaf.buffer().data();
+				
+				// OPTIMIZATION: Prefetch next leaf data for better cache performance
+				if (i + 1 < r.end() && start + i + 1 < totalLeaves_) {
+					const auto& nextLeaf = leafManager_.leaf(start + i + 1);
+					__builtin_prefetch(nextLeaf.buffer().data(), 0, 3);
+				}
+				
 				// Direct copy to the correct position in 5D tensor (skip channel dim offset)
 				float* dst = dstBase + i * LEAF_VOXELS;
 				std::memcpy(dst, src, LEAF_VOXELS * sizeof(float));
@@ -211,7 +247,30 @@ VQVAECodec::VQVAECodec()
       encodeMethod_(std::get<1>(model_parts_)),
       decodeMethod_(std::get<2>(model_parts_)),
       memoryPool_(std::make_unique<GPUMemoryPool>(device_)),
-      streamManager_(std::make_unique<StreamManager>(device_)) {}
+      streamManager_(std::make_unique<StreamManager>(device_)) {
+    
+    // Pre-warm memory pool with common tensor sizes for VDB leaf blocks
+    if (device_.is_cuda()) {
+        std::vector<std::pair<std::vector<int64_t>, torch::ScalarType>> commonShapes = {
+            {{16, 1, 8, 8, 8}, torch::kFloat32},  // Typical batch size with channel dim
+            {{32, 1, 8, 8, 8}, torch::kFloat32},  // Larger batch
+            {{16, 4, 4}, torch::kU8},             // Typical encoded output size
+            {{32, 4, 4}, torch::kU8},             // Larger encoded batch
+        };
+        memoryPool_->warmup(commonShapes);
+    }
+}
+
+VQVAECodec::~VQVAECodec() {
+    // Synchronize all GPU operations before cleanup
+    if (streamManager_ && device_.is_cuda()) {
+        streamManager_->synchronizeAll();
+    }
+    // Clear GPU memory pool
+    if (memoryPool_) {
+        memoryPool_->clear();
+    }
+}
 
 void VQVAECodec::compress(const openvdb::FloatGrid::Ptr& grid, const std::string& outPath, const size_t batchSize) const {
 	const auto t0 = std::chrono::high_resolution_clock::now();
@@ -334,7 +393,7 @@ torch::Tensor VQVAECodec::encodeBatch(const torch::Tensor& cpuBatch) const {
 		gpuTensor.copy_(cpuBatch, /*non_blocking=*/true);
 		
 		// Synchronize H2D transfer before computation
-		cudaStreamSynchronize(h2dStream);
+		checkCudaError(cudaStreamSynchronize(h2dStream), "H2D stream synchronization failed");
 	} else {
 		gpuTensor.copy_(cpuBatch);
 	}
@@ -357,7 +416,7 @@ torch::Tensor VQVAECodec::encodeBatch(const torch::Tensor& cpuBatch) const {
 	if (device_.is_cuda()) {
 		auto d2hStream = static_cast<cudaStream_t>(streamManager_->getD2HStream());
 		cpuResult.copy_(gpuResult, /*non_blocking=*/true);
-		cudaStreamSynchronize(d2hStream);
+		checkCudaError(cudaStreamSynchronize(d2hStream), "D2H stream synchronization failed");
 	} else {
 		cpuResult.copy_(gpuResult);
 	}
@@ -385,7 +444,7 @@ torch::Tensor VQVAECodec::decodeBatch(const torch::Tensor& cpuBatch) const {
 	if (device_.is_cuda()) {
 		auto h2dStream = static_cast<cudaStream_t>(streamManager_->getH2DStream());
 		gpuTensor.copy_(cpuBatch, /*non_blocking=*/true);
-		cudaStreamSynchronize(h2dStream);
+		checkCudaError(cudaStreamSynchronize(h2dStream), "Decode H2D stream synchronization failed");
 	} else {
 		gpuTensor.copy_(cpuBatch);
 	}
@@ -408,7 +467,7 @@ torch::Tensor VQVAECodec::decodeBatch(const torch::Tensor& cpuBatch) const {
 	if (device_.is_cuda()) {
 		auto d2hStream = static_cast<cudaStream_t>(streamManager_->getD2HStream());
 		cpuResult.copy_(result, /*non_blocking=*/true);
-		cudaStreamSynchronize(d2hStream);
+		checkCudaError(cudaStreamSynchronize(d2hStream), "Decode D2H stream synchronization failed");
 	} else {
 		cpuResult.copy_(result);
 	}
