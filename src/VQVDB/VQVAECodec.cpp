@@ -39,7 +39,7 @@ class VDBInputBlockStreamer {
 
 		// Use pinned memory for asynchronous H2D copy later
 		auto opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU).pinned_memory(true);
-		torch::Tensor batch = torch::empty({static_cast<long>(B), LEAF_DIM, LEAF_DIM, LEAF_DIM}, opts);
+		torch::Tensor batch = torch::empty({static_cast<long>(B), 1, LEAF_DIM, LEAF_DIM, LEAF_DIM}, opts);
 		std::vector<openvdb::Coord> origins(B);
 
 		float* dstBase = batch.data_ptr<float>();
@@ -53,7 +53,7 @@ class VDBInputBlockStreamer {
 			}
 		});
 
-		return {batch.unsqueeze(1), origins};  // Add channel dim: [B, 1, D, D, D]
+		return {batch, origins};  // Add channel dim: [B, 1, D, D, D]
 	}
 
    private:
@@ -70,7 +70,7 @@ class VDBInputBlockStreamer {
 // --- Implementation of the private static helper function ---
 std::tuple<torch::jit::Module, torch::jit::Method, torch::jit::Method> VQVAECodec::load_embedded_model(const torch::Device& device) {
 	// Create a string stream from the embedded byte array
-	std::string model_string(reinterpret_cast<const char*>(g_model_data), g_model_data_size);
+	const std::string model_string(reinterpret_cast<const char*>(g_model_data), g_model_data_size);
 	std::istringstream stream(model_string);
 
 	torch::jit::Module module;
