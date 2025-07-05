@@ -3,6 +3,7 @@
 #include <GU/GU_Detail.h>
 #include <UT/UT_DSOVersion.h>
 
+#include "Backend/TorchBackend.hpp"
 #include "Utils/Utils.hpp"
 #include "VQVAECodec.hpp"
 
@@ -68,9 +69,11 @@ void SOP_VQVDB_EncoderVerb::cook(const CookParms& cookparms) const {
 		// --- Validate Parameters ---
 		if (out_path.empty()) {
 			cookparms.sopAddError(SOP_MESSAGE, "Model path and/or Output path must be specified.");
+			return;
 		}
 		if (!input_gdp) {
 			cookparms.sopAddError(SOP_MESSAGE, "No input geometry connected.");
+			return;
 		}
 
 		// --- Load Grid ---
@@ -80,12 +83,14 @@ void SOP_VQVDB_EncoderVerb::cook(const CookParms& cookparms) const {
 		}
 		if (!grid) {
 			cookparms.sopAddError(SOP_MESSAGE, "VDB grid is null or not found.");
+			return;
 		}
 
 		// --- Run Encoder ---
 		cookparms.sopAddMessage(SOP_MESSAGE, "Starting VQ-VDB encoding...");
 
-		const VQVAECodec codec{};
+
+		const VQVAECodec codec(std::make_shared<TorchBackend>());
 
 		codec.compress(grid, out_path, batch_size);
 

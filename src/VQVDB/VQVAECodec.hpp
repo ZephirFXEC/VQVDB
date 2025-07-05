@@ -11,20 +11,21 @@
 #include <filesystem>
 #include <string>
 
+#include "Backend/IVQVAECodec.hpp"
+
 /**
  * @class VQVAECodec
  * @brief A class for compressing and decompressing OpenVDB FloatGrids using a VQ-VAE model.
  *
  * This class provides a high-level interface to stream VDB leaf nodes to a neural network
- * for compression, and to stream encoded data from a file for decompression. It handles
- * GPU acceleration via PyTorch/libtorch if a CUDA-enabled device is available.
+ * for compression, and to stream encoded data from a file for decompression.
  */
 class VQVAECodec {
    public:
 	/**
 	 * @brief Constructs the VQVAECodec.
 	 */
-	explicit VQVAECodec();
+	explicit VQVAECodec(const std::shared_ptr<IVQVAECodec>& backend);
 
 	/**
 	 * @brief Compresses an OpenVDB FloatGrid into a .vqvdb file.
@@ -67,12 +68,5 @@ class VQVAECodec {
 	 */
 	torch::Tensor decodeBatch(const torch::Tensor& cpuBatch) const;
 
-	torch::Device device_;
-
-	static std::tuple<torch::jit::Module, torch::jit::Method, torch::jit::Method> load_embedded_model(const torch::Device& device);
-	std::tuple<torch::jit::Module, torch::jit::Method, torch::jit::Method> model_parts_;
-
-	torch::jit::Module model_;
-	torch::jit::Method encodeMethod_;
-	torch::jit::Method decodeMethod_;
+	std::shared_ptr<IVQVAECodec> backend_;
 };

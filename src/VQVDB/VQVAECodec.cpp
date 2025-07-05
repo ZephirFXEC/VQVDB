@@ -6,7 +6,6 @@
 #include "VQVAECodec.hpp"
 
 #include <openvdb/tools/GridOperators.h>
-#include <torch/cuda.h>
 
 #include <chrono>
 #include <iostream>
@@ -17,8 +16,6 @@
 // Constants for VDB leaf nodes. A leaf is a dense 8x8x8 grid of voxels.
 constexpr uint8_t LEAF_DIM = 8;
 constexpr uint16_t LEAF_VOXELS = LEAF_DIM * LEAF_DIM * LEAF_DIM;  // 512
-
-#include "bin_model.h"
 
 // =========================================================================================
 // Helper Streamer for Reading VDB Leaf Blocks (for Compression)
@@ -66,41 +63,11 @@ class VDBInputBlockStreamer {
 // =========================================================================================
 // VQVAECodec Method Implementations
 // =========================================================================================
-
-// --- Implementation of the private static helper function ---
-std::tuple<torch::jit::Module, torch::jit::Method, torch::jit::Method> VQVAECodec::load_embedded_model(const torch::Device& device) {
-	// Create a string stream from the embedded byte array
-	const std::string model_string(reinterpret_cast<const char*>(g_model_data), g_model_data_size);
-	std::istringstream stream(model_string);
-
-	torch::jit::Module module;
-	try {
-		// Load the model from the stream (onto CPU by default)
-		module = torch::jit::load(stream);
-	} catch (const c10::Error& e) {
-		throw std::runtime_error("Failed to load TorchScript model from memory: " + std::string(e.what()));
+VQVAECodec::VQVAECodec(const std::shared_ptr<IVQVAECodec>& backend) : backend_(backend) {
+	if (!backend_) {
+		throw std::runtime_error("VQVAECodec: Backend is not initialized.");
 	}
-
-	// Move the loaded module to the target device
-	module.to(device);
-	module.eval();
-
-	// Get the methods from the now-configured module
-	torch::jit::Method encode_method = module.get_method("encode");
-	torch::jit::Method decode_method = module.get_method("decode");
-
-	std::cout << "VQVAECodec: Model successfully loaded from memory onto device: " << device << '\n';
-
-	// Return all the constructed objects in a tuple
-	return {std::move(module), std::move(encode_method), std::move(decode_method)};
 }
-
-VQVAECodec::VQVAECodec()
-    : device_(torch::cuda::is_available() ? torch::kCUDA : torch::kCPU),
-      model_parts_(load_embedded_model(device_)),
-      model_(std::get<0>(model_parts_)),
-      encodeMethod_(std::get<1>(model_parts_)),
-      decodeMethod_(std::get<2>(model_parts_)) {}
 
 void VQVAECodec::compress(const openvdb::FloatGrid::Ptr& grid, const std::string& outPath, const size_t batchSize) const {
 	const auto t0 = std::chrono::high_resolution_clock::now();
@@ -112,23 +79,11 @@ void VQVAECodec::compress(const openvdb::FloatGrid::Ptr& grid, const std::string
 		return;
 	}
 
-	// --- Step 1: Get latent shape from a dummy tensor ---
-	// (This part remains the same, but is necessary for the header)
-	std::vector<int64_t> latentShapeVec;
-	{
-		torch::NoGradGuard nograd;
-		auto opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
-		torch::Tensor dummyInput = torch::randn({1, 1, LEAF_DIM, LEAF_DIM, LEAF_DIM}, opts);
-		auto idx = encodeBatch(dummyInput).sizes();  // e.g., [1, H, W]
-		latentShapeVec.assign(idx.begin() + 1, idx.end());
-	}
-
-	// --- Step 2: Create the optimized writer ---
-	// The writer handles the header and buffered I/O automatically.
-	VDBStreamWriter writer(outPath, 256, latentShapeVec, N);  // 256 numEmbeddings hardcoded
-
-	// --- Step 3: Stream, encode, and write data blocks ---
+	const std::vector<int64_t>& latentShapeVec = backend_->getLatentShape();
+	VDBStreamWriter writer(outPath, 256, latentShapeVec, N);
 	VDBInputBlockStreamer streamer(leafMgr);
+
+
 	int64_t done = 0;
 	const auto t1 = std::chrono::high_resolution_clock::now();
 	std::cout << "Starting compression of " << N << " blocks using optimized writer...\n";
@@ -156,16 +111,12 @@ void VQVAECodec::compress(const openvdb::FloatGrid::Ptr& grid, const std::string
 void VQVAECodec::decompress(const std::string& inPath, openvdb::FloatGrid::Ptr& grid, const size_t batchSize) const {
 	const auto t0 = std::chrono::high_resolution_clock::now();
 
-	// --- Step 1: Use the optimized stream reader ---
-	// The reader handles the header and buffered I/O automatically.
 	VDBStreamReader streamer(inPath);
 	std::cout << "Starting decompression using optimized reader...\n";
 
-	// --- Step 2: Prepare the output grid ---
 	grid = openvdb::FloatGrid::create();
 	auto accessor = grid->getAccessor();
 
-	// --- Step 3: Stream, decode, and write data to the new grid ---
 	const auto t1 = std::chrono::high_resolution_clock::now();
 	int64_t done = 0;
 
@@ -173,14 +124,13 @@ void VQVAECodec::decompress(const std::string& inPath, openvdb::FloatGrid::Ptr& 
 		EncodedBatch batch = streamer.nextBatch(batchSize);
 		if (batch.data.numel() == 0) break;
 
-		torch::Tensor decodedData = decodeBatch(batch.data);  // Returns float32 on CPU
+		torch::Tensor decodedData = decodeBatch(batch.data);
 
 		const float* dataPtr = decodedData.data_ptr<float>();
 
 		for (size_t i = 0; i < batch.origins.size(); ++i) {
 			const openvdb::Coord& origin = batch.origins[i];
 
-			// This creates the leaf in the tree if it doesn't exist.
 			if (auto* leaf = accessor.touchLeaf(origin)) {
 				const float* src = dataPtr + i * LEAF_VOXELS;
 				std::memcpy(leaf->buffer().data(), src, LEAF_VOXELS * sizeof(float));
@@ -199,16 +149,6 @@ void VQVAECodec::decompress(const std::string& inPath, openvdb::FloatGrid::Ptr& 
 	printf("\n-- Setup  : %lld ms\n-- Decode : %lld ms\n", setup, decomp);
 }
 
-torch::Tensor VQVAECodec::encodeBatch(const torch::Tensor& cpuBatch) const {
-	torch::NoGradGuard nograd;
-	torch::Tensor gpuTensor = cpuBatch.to(device_, /*non_blocking=*/true);
-	const torch::Tensor result = encodeMethod_({gpuTensor}).toTensor();
-	return result.to(torch::kCPU, torch::kU8);
-}
+torch::Tensor VQVAECodec::encodeBatch(const torch::Tensor& cpuBatch) const { return backend_->encode(cpuBatch); }
 
-torch::Tensor VQVAECodec::decodeBatch(const torch::Tensor& cpuBatch) const {
-	torch::NoGradGuard nograd;
-	torch::Tensor gpuTensor = cpuBatch.to(device_, torch::kLong, /*non_blocking=*/true);
-	const torch::Tensor result = decodeMethod_({gpuTensor}).toTensor();
-	return result.to(torch::kCPU, torch::kFloat32);
-}
+torch::Tensor VQVAECodec::decodeBatch(const torch::Tensor& cpuBatch) const { return backend_->decode(cpuBatch); }

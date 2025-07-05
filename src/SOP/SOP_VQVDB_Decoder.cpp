@@ -3,6 +3,7 @@
 #include <GU/GU_Detail.h>
 #include <UT/UT_DSOVersion.h>
 
+#include "Backend/TorchBackend.hpp"
 #include "Utils/Utils.hpp"
 #include "VQVAECodec.hpp"
 
@@ -63,9 +64,9 @@ void SOP_VQVDB_DecoderVerb::cook(const CookParms& cookparms) const {
 		// --- Run Decoder ---
 		cookparms.sopAddMessage(SOP_MESSAGE, "Starting VQ-VDB decoding...");
 
-		const VQVAECodec decoder{};
+		const VQVAECodec codec(std::make_shared<TorchBackend>());
 
-		decoder.decompress(in_path.data(), output_grid, sopparms.getBatchsize());
+		codec.decompress(in_path.data(), output_grid, sopparms.getBatchsize());
 	} catch (const std::exception& e) {
 		cookparms.sopAddError(SOP_MESSAGE, e.what());
 	}
