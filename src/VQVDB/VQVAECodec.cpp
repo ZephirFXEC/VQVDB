@@ -12,13 +12,16 @@
 #include <iostream>
 #include <vector>
 
+#include "Profiler.hpp"
 #include "VQVDB_Reader.hpp"
 
 // Constants for VDB leaf nodes. A leaf is a dense 8x8x8 grid of voxels.
 constexpr uint8_t LEAF_DIM = 8;
 constexpr uint16_t LEAF_VOXELS = LEAF_DIM * LEAF_DIM * LEAF_DIM;  // 512
 
-#include "bin_model.h"
+#include "bin_decoder.h"
+#include "bin_encoder.h"
+
 
 // =========================================================================================
 // Helper Streamer for Reading VDB Leaf Blocks (for Compression)
@@ -67,40 +70,45 @@ class VDBInputBlockStreamer {
 // VQVAECodec Method Implementations
 // =========================================================================================
 
-// --- Implementation of the private static helper function ---
-std::tuple<torch::jit::Module, torch::jit::Method, torch::jit::Method> VQVAECodec::load_embedded_model(const torch::Device& device) {
-	// Create a string stream from the embedded byte array
-	const std::string model_string(reinterpret_cast<const char*>(g_model_data), g_model_data_size);
-	std::istringstream stream(model_string);
+VQVAECodec::VQVAECodec()
+    : env_(ORT_LOGGING_LEVEL_WARNING, "VQVAE-ONNX-Codec"), device_(torch::cuda::is_available() ? torch::kCUDA : torch::kCPU) {
+	PROFILE_SCOPE("Load ONNX Models");
 
-	torch::jit::Module module;
-	try {
-		// Load the model from the stream (onto CPU by default)
-		module = torch::jit::load(stream);
-	} catch (const c10::Error& e) {
-		throw std::runtime_error("Failed to load TorchScript model from memory: " + std::string(e.what()));
+	Ort::SessionOptions session_options;
+	session_options.SetIntraOpNumThreads(1);
+	session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+
+	if (device_.is_cuda()) {
+		std::cout << "VQVAECodec: CUDA is available. Using CUDA Execution Provider." << std::endl;
+		OrtCUDAProviderOptions cuda_options{};
+		session_options.AppendExecutionProvider_CUDA(cuda_options);
+		memory_info_cuda_ = Ort::MemoryInfo("Cuda", OrtArenaAllocator, 0, OrtMemTypeDefault);
+	} else {
+		std::cout << "VQVAECodec: CUDA not found. Using CPU Execution Provider." << std::endl;
 	}
 
-	// Move the loaded module to the target device
-	module.to(device);
-	module.eval();
+	// Load encoder model from embedded data
+	try {
+		encoder_session_ = std::make_unique<Ort::Session>(env_, g_encoder_data, g_encoder_data_size, session_options);
+	} catch (const Ort::Exception& e) {
+		throw std::runtime_error("Failed to load ONNX encoder model: " + std::string(e.what()));
+	}
 
-	// Get the methods from the now-configured module
-	torch::jit::Method encode_method = module.get_method("encode");
-	torch::jit::Method decode_method = module.get_method("decode");
+	// Load decoder model from embedded data
+	try {
+		decoder_session_ = std::make_unique<Ort::Session>(env_, g_decoder_data, g_decoder_data_size, session_options);
+	} catch (const Ort::Exception& e) {
+		throw std::runtime_error("Failed to load ONNX decoder model: " + std::string(e.what()));
+	}
 
-	std::cout << "VQVAECodec: Model successfully loaded from memory onto device: " << device << '\n';
+	// Set input/output names (these must match what you defined during ONNX export)
+	encoder_input_names_ = {"input"};
+	encoder_output_names_ = {"output"};
+	decoder_input_names_ = {"input"};
+	decoder_output_names_ = {"output"};
 
-	// Return all the constructed objects in a tuple
-	return {std::move(module), std::move(encode_method), std::move(decode_method)};
+	std::cout << "VQVAECodec: ONNX encoder and decoder models loaded successfully." << std::endl;
 }
-
-VQVAECodec::VQVAECodec()
-    : device_(torch::cuda::is_available() ? torch::kCUDA : torch::kCPU),
-      model_parts_(load_embedded_model(device_)),
-      model_(std::get<0>(model_parts_)),
-      encodeMethod_(std::get<1>(model_parts_)),
-      decodeMethod_(std::get<2>(model_parts_)) {}
 
 void VQVAECodec::compress(const openvdb::FloatGrid::Ptr& grid, const std::string& outPath, const size_t batchSize) const {
 	const auto t0 = std::chrono::high_resolution_clock::now();
@@ -199,16 +207,104 @@ void VQVAECodec::decompress(const std::string& inPath, openvdb::FloatGrid::Ptr& 
 	printf("\n-- Setup  : %lld ms\n-- Decode : %lld ms\n", setup, decomp);
 }
 
+// Helper function to map torch dtype to ONNX dtype
+ONNXTensorElementDataType to_onnx_type(const c10::ScalarType& dtype) {
+	switch (dtype) {
+		case torch::kFloat32:
+			return ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
+		case torch::kFloat16:
+			return ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16;
+		case torch::kInt64:
+			return ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64;
+		case torch::kInt32:
+			return ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32;
+		case torch::kInt8:
+			return ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8;
+		case torch::kUInt8:
+			return ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8;
+		default:
+			throw std::invalid_argument("Unsupported torch dtype for ONNX conversion");
+	}
+}
+
 torch::Tensor VQVAECodec::encodeBatch(const torch::Tensor& cpuBatch) const {
+	PROFILE_SCOPE("EncodeBatch Total");
 	torch::NoGradGuard nograd;
+
+	// --- H2D Copy ---
+	// Note: If model is FP16, use .to(torch::kHalf)
+	PROFILE_START("Encode::H2D Copy");
 	torch::Tensor gpuTensor = cpuBatch.to(device_, /*non_blocking=*/true);
-	const torch::Tensor result = encodeMethod_({gpuTensor}).toTensor();
-	return result.to(torch::kCPU, torch::kU8);
+	if (device_.is_cuda()) torch::cuda::synchronize();
+	PROFILE_END("Encode::H2D Copy");
+
+	// --- Create ONNX Runtime Input Tensor ---
+	std::vector<int64_t> input_shape = gpuTensor.sizes().vec();
+	Ort::Value input_tensor =
+	    Ort::Value::CreateTensor(memory_info_cuda_, gpuTensor.data_ptr(), gpuTensor.numel() * gpuTensor.element_size(), input_shape.data(),
+	                             input_shape.size(), to_onnx_type(gpuTensor.scalar_type()));
+
+	// --- Inference ---
+	PROFILE_START("Encode::Inference");
+	auto output_tensors =
+	    encoder_session_->Run(Ort::RunOptions{nullptr}, encoder_input_names_.data(), &input_tensor, 1, encoder_output_names_.data(), 1);
+	if (device_.is_cuda()) torch::cuda::synchronize();
+	PROFILE_END("Encode::Inference");
+
+	// --- Wrap ONNX Output in torch::Tensor (no copy) ---
+	Ort::Value& output_tensor = output_tensors.front();
+	auto* float_vals = output_tensor.GetTensorMutableData<int64_t>();  // Encoder outputs int64
+	Ort::TensorTypeAndShapeInfo shape_info = output_tensor.GetTensorTypeAndShapeInfo();
+	auto output_shape = shape_info.GetShape();
+
+	// The output tensor is already on the GPU. We can wrap it without a D2H copy.
+	auto gpu_result = torch::from_blob(float_vals, torch::IntArrayRef(output_shape), torch::kInt64).to(device_);
+
+	// --- D2H Copy ---
+	PROFILE_START("Encode::D2H Copy");
+	torch::Tensor cpu_result = gpu_result.to(torch::kCPU, torch::kUInt8);  // Final conversion to uint8
+	PROFILE_END("Encode::D2H Copy");
+
+	return cpu_result;
 }
 
 torch::Tensor VQVAECodec::decodeBatch(const torch::Tensor& cpuBatch) const {
+	PROFILE_SCOPE("DecodeBatch Total");
 	torch::NoGradGuard nograd;
-	torch::Tensor gpuTensor = cpuBatch.to(device_, torch::kLong, /*non_blocking=*/true);
-	const torch::Tensor result = decodeMethod_({gpuTensor}).toTensor();
-	return result.to(torch::kCPU, torch::kFloat32);
+
+	// --- H2D Copy ---
+	// Decoder input is int64 indices
+	PROFILE_START("Decode::H2D Copy");
+	torch::Tensor gpuTensor = cpuBatch.to(device_, torch::kInt64, /*non_blocking=*/true);
+	if (device_.is_cuda()) torch::cuda::synchronize();
+	PROFILE_END("Decode::H2D Copy");
+
+	// --- Create ONNX Runtime Input Tensor ---
+	std::vector<int64_t> input_shape = gpuTensor.sizes().vec();
+	Ort::Value input_tensor =
+	    Ort::Value::CreateTensor(memory_info_cuda_, gpuTensor.data_ptr<int64_t>(), gpuTensor.numel() * sizeof(int64_t), input_shape.data(),
+	                             input_shape.size(), ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
+
+	// --- Inference ---
+	PROFILE_START("Decode::Inference");
+	auto output_tensors =
+	    decoder_session_->Run(Ort::RunOptions{nullptr}, decoder_input_names_.data(), &input_tensor, 1, decoder_output_names_.data(), 1);
+	if (device_.is_cuda()) torch::cuda::synchronize();
+	PROFILE_END("Decode::Inference");
+
+	// --- Wrap ONNX Output in torch::Tensor (no copy) ---
+	Ort::Value& output_tensor = output_tensors.front();
+	auto* float_vals = output_tensor.GetTensorMutableData<float>();  // Decoder outputs floats
+	Ort::TensorTypeAndShapeInfo shape_info = output_tensor.GetTensorTypeAndShapeInfo();
+	auto output_shape = shape_info.GetShape();
+
+	// Note: If model is FP16, use torch::kHalf
+	auto gpu_result = torch::from_blob(float_vals, torch::IntArrayRef(output_shape), torch::kFloat32).to(device_);
+
+	// --- D2H Copy ---
+	PROFILE_START("Decode::D2H Copy");
+	torch::Tensor cpu_result = gpu_result.to(torch::kCPU);
+	PROFILE_END("Decode::D2H Copy");
+
+	return cpu_result;
 }

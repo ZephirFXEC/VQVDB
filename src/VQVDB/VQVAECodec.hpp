@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <onnxruntime/core/session/onnxruntime_cxx_api.h>
 #include <openvdb/openvdb.h>
 #include <torch/script.h>
 
@@ -25,6 +26,8 @@ class VQVAECodec {
 	 * @brief Constructs the VQVAECodec.
 	 */
 	explicit VQVAECodec();
+
+	~VQVAECodec() = default;
 
 	/**
 	 * @brief Compresses an OpenVDB FloatGrid into a .vqvdb file.
@@ -67,12 +70,22 @@ class VQVAECodec {
 	 */
 	torch::Tensor decodeBatch(const torch::Tensor& cpuBatch) const;
 
+	// Helper to convert torch::Tensor to Ort::Value
+	Ort::Value tensorToOrtValue(const torch::Tensor& tensor, const Ort::MemoryInfo& memory_info) const;
+
+	// --- ONNX Runtime Members ---
+	Ort::Env env_;
+	Ort::SessionOptions session_options_;
+	std::unique_ptr<Ort::Session> encoder_session_;
+	std::unique_ptr<Ort::Session> decoder_session_;
+
+	// Store input/output names for convenience
+	std::vector<const char*> encoder_input_names_;
+	std::vector<const char*> encoder_output_names_;
+	std::vector<const char*> decoder_input_names_;
+	std::vector<const char*> decoder_output_names_;
+
+	// --- Other Members ---
 	torch::Device device_;
-
-	static std::tuple<torch::jit::Module, torch::jit::Method, torch::jit::Method> load_embedded_model(const torch::Device& device);
-	std::tuple<torch::jit::Module, torch::jit::Method, torch::jit::Method> model_parts_;
-
-	torch::jit::Module model_;
-	torch::jit::Method encodeMethod_;
-	torch::jit::Method decodeMethod_;
+	Ort::MemoryInfo memory_info_cuda_{nullptr};  // To be initialized
 };

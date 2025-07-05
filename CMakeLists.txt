@@ -9,14 +9,9 @@ find_package(Torch CONFIG REQUIRED)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-
-# Set vars for OpenVDB
-if (UNIX)
-    set(openvdb_lib "$ENV{HFS}/dsolib/libopenvdb_sesi.so")
-endif ()
-
 if (WIN32)
     set(openvdb_lib "$ENV{HFS}/custom/houdini/dsolib/openvdb_sesi.lib")
+    set(onnx_lib "$ENV{HFS}/custom/houdini/dsolib/onnxruntime.lib")
 endif ()
 
 # ------- Find Houdini --------
@@ -25,7 +20,7 @@ find_package(Houdini REQUIRED)
 
 # Create an interface library for Houdini & OpenVDB
 add_library(HoudiniVDB INTERFACE)
-target_link_libraries(HoudiniVDB INTERFACE Houdini ${openvdb_lib})
+target_link_libraries(HoudiniVDB INTERFACE Houdini ${openvdb_lib} ${onnx_lib})
 target_include_directories(HoudiniVDB INTERFACE
         $ENV{HFS}/toolkit/include
 )
@@ -50,6 +45,7 @@ target_include_directories(VQVDB PUBLIC
 
 target_link_libraries(VQVDB PUBLIC
         HoudiniVDB
+        ${onnx_lib}
         ${TORCH_LIBRARIES}
 )
 
