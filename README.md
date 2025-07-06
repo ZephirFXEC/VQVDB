@@ -11,6 +11,9 @@
   <a> <img src="https://github.com/user-attachments/assets/1f0bc6b6-ae5b-487f-a2cb-47bfffae0e0c"> </a>
 </div>
 
+<div align="center">
+  <h2> <a href=https://github.com/ZephirFXEC/VQVDB/releases/>Download the latest version</a> </h2>
+</div>
 <br>
 
 # Oveview 
