@@ -37,6 +37,9 @@ target_include_directories(HoudiniVDB INTERFACE
         $ENV{HFS}/toolkit/include
 )
 
+add_compile_options(/O2 /Gy /Zc:inline)
+add_link_options(/OPT:REF /OPT:ICF /INCREMENTAL:NO)
+
 # ─────────── Optional back-ends ───────────────────────────────────────────
 set(BACKEND_LIBS "")
 

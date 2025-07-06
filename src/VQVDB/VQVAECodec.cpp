@@ -80,7 +80,17 @@ void VQVAECodec::compress(const openvdb::FloatGrid::Ptr& grid, const std::string
 	}
 
 	const std::vector<int64_t>& latentShapeVec = backend_->getLatentShape();
-	VDBStreamWriter writer(outPath, 256, latentShapeVec, N);
+
+	// --- Gather all metadata for the VQVDB file header ---
+	VQVDBMetadata metadata;
+	metadata.fileVersion = 2;
+	metadata.numEmbeddings = 256;  // Assuming a fixed codebook size
+	metadata.latentShape = backend_->getLatentShape();
+	metadata.totalBlocks = N;
+	metadata.voxelSize = grid->voxelSize();
+	metadata.transform = grid->transform().baseMap()->getAffineMap()->getMat4();
+
+	VDBStreamWriter writer(outPath, metadata);
 	VDBInputBlockStreamer streamer(leafMgr);
 
 
@@ -112,9 +122,14 @@ void VQVAECodec::decompress(const std::string& inPath, openvdb::FloatGrid::Ptr& 
 	const auto t0 = std::chrono::high_resolution_clock::now();
 
 	VDBStreamReader streamer(inPath);
-	std::cout << "Starting decompression using optimized reader...\n";
+	const VQVDBMetadata& metadata = streamer.getMetadata();
+	std::cout << "Starting decompression ...\n";
 
+	// Create grid and apply the metadata read from the file
 	grid = openvdb::FloatGrid::create();
+	auto transform = openvdb::math::Transform::createLinearTransform(metadata.transform);
+	grid->setTransform(transform);
+
 	auto accessor = grid->getAccessor();
 
 	const auto t1 = std::chrono::high_resolution_clock::now();

@@ -6,13 +6,34 @@
 #include <fstream>
 #include <string>
 
+
+struct VQVDBMetadata {
+	uint8_t fileVersion = 0;
+	uint32_t numEmbeddings = 0;
+	std::vector<int64_t> latentShape;
+	size_t totalBlocks = 0;
+
+	// Grid properties
+	openvdb::Vec3f voxelSize{1.0, 1.0, 1.0};
+	openvdb::math::Mat4f transform;
+
+	VQVDBMetadata() { transform.identity(); }
+};
+
 #pragma pack(push, 1)
 struct VQVDBHeader {
 	char magic[5] = {'V', 'Q', 'V', 'D', 'B'};
 	uint8_t version = 2;
 	uint32_t numEmbeddings = 0;
 	uint8_t latentDimCount = 0;
+	uint32_t headerExtensionSize = 0;
 };
+
+struct VQVDBHeaderExtension {
+	float voxelSize[3];
+	double transform[16];  // Stored as a 4x4 matrix
+};
+
 #pragma pack(pop)
 
 // A struct to hold a batch of data read from the file.
@@ -24,7 +45,7 @@ struct EncodedBatch {
 
 class VDBStreamWriter {
    public:
-	VDBStreamWriter(const std::string& outPath, uint32_t numEmbeddings, const std::vector<int64_t>& latentShape, size_t totalBlocks);
+	VDBStreamWriter(const std::string& outPath, const VQVDBMetadata& metadata);
 
 	~VDBStreamWriter() {
 		flush();
@@ -46,7 +67,7 @@ class VDBStreamWriter {
 	std::ofstream fileStream_;
 	std::string filePath_;
 	const size_t blockDataSize_;
-	const size_t chunkSize_; // sizeof(Coord) + blockDataSize_
+	const size_t chunkSize_;  // sizeof(Coord) + blockDataSize_
 
 	// Use a large buffer (e.g., 4MB) for optimized disk writes
 	static constexpr size_t IO_BUFFER_SIZE = 4 * 1024 * 1024;
@@ -59,13 +80,13 @@ class VDBStreamReader {
    public:
 	explicit VDBStreamReader(const std::string& inPath);
 
-	[[nodiscard]] bool hasNext() const noexcept { return blocksRead_ < totalBlocks_; }
-
+	[[nodiscard]] bool hasNext() const noexcept { return blocksRead_ < metadata_.totalBlocks; }
 	EncodedBatch nextBatch(size_t maxBatch);
 
 	// Accessors for metadata
-	[[nodiscard]] size_t totalBlocks() const { return totalBlocks_; }
-	[[nodiscard]] const std::vector<int64_t>& latentShape() const { return tensorShapeSuffix_; }
+	[[nodiscard]] size_t totalBlocks() const { return metadata_.totalBlocks; }
+	[[nodiscard]] const std::vector<int64_t>& latentShape() const { return metadata_.latentShape; }
+	[[nodiscard]] const VQVDBMetadata& getMetadata() const { return metadata_; }
 
 
    private:
@@ -82,12 +103,9 @@ class VDBStreamReader {
 		bufferBytes_ = remainingBytes + fileStream_.gcount();
 	}
 
+	VQVDBMetadata metadata_;
 	std::ifstream fileStream_;
-	size_t totalBlocks_ = 0;
 	size_t blocksRead_ = 0;
-	uint32_t numEmbeddings_ = 0;
-	std::vector<uint16_t> latentShape_;       // As read from file
-	std::vector<int64_t> tensorShapeSuffix_;  // As int64_t for torch
 
 	size_t blockDataSize_ = 0;
 	size_t chunkSize_ = 0;  // sizeof(Coord) + blockDataSize_
