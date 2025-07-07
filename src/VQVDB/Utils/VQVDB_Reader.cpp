@@ -4,7 +4,7 @@ VDBStreamWriter::VDBStreamWriter(std::string_view outPath, const VQVDBMetadata& 
     : blockDataSize_(std::accumulate(metadata.latentShape.begin(), metadata.latentShape.end(), 1, std::multiplies<int64_t>())),
       chunkSize_(sizeof(openvdb::Coord) + blockDataSize_),
       buffer_(IO_BUFFER_SIZE) {
-	fileStream_.open(outPath.data(), std::ios::binary);
+	fileStream_.open(outPath.data(), std::ios::binary | std::ios::out);
 	if (!fileStream_) {
 		throw std::runtime_error("Cannot open output file: " + std::string(outPath));
 	}
@@ -66,7 +66,7 @@ void VDBStreamWriter::flush() {
 
 
 VDBStreamReader::VDBStreamReader(const std::string_view inPath) : buffer_(IO_BUFFER_SIZE) {
-	fileStream_.open(inPath.data(), std::ios::binary);
+	fileStream_.open(inPath.data(), std::ios::binary | std::ios::in);
 	if (!fileStream_) {
 		throw std::runtime_error("Cannot open input file: " + std::string(inPath));
 	}
