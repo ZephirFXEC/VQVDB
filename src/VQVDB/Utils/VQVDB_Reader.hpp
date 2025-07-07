@@ -13,7 +13,6 @@ struct VQVDBMetadata {
 	std::vector<int64_t> latentShape;
 	size_t totalBlocks = 0;
 
-	// Grid properties
 	openvdb::Vec3f voxelSize{1.0, 1.0, 1.0};
 	openvdb::math::Mat4f transform;
 
@@ -31,12 +30,10 @@ struct VQVDBHeader {
 
 struct VQVDBHeaderExtension {
 	float voxelSize[3];
-	double transform[16];  // Stored as a 4x4 matrix
+	double transform[16];
 };
-
 #pragma pack(pop)
 
-// A struct to hold a batch of data read from the file.
 struct EncodedBatch {
 	torch::Tensor data;
 	std::vector<openvdb::Coord> origins;
@@ -45,27 +42,19 @@ struct EncodedBatch {
 
 class VDBStreamWriter {
    public:
-	VDBStreamWriter(const std::string& outPath, const VQVDBMetadata& metadata);
+	VDBStreamWriter(std::string_view outPath, const VQVDBMetadata& metadata);
 
-	~VDBStreamWriter() {
-		flush();
-		fileStream_.close();
-	}
+	~VDBStreamWriter() noexcept;
 
 	// Writes a batch of encoded data and their origins to the internal buffer,
 	// flushing to disk when the buffer is full.
 	void writeBatch(const torch::Tensor& encodedIndices, const std::vector<openvdb::Coord>& origins);
 
    private:
-	void flush() {
-		if (bufferOffset_ > 0) {
-			fileStream_.write(buffer_.data(), bufferOffset_);
-			bufferOffset_ = 0;
-		}
-	}
+	void flush();
+
 
 	std::ofstream fileStream_;
-	std::string filePath_;
 	const size_t blockDataSize_;
 	const size_t chunkSize_;  // sizeof(Coord) + blockDataSize_
 
@@ -78,30 +67,19 @@ class VDBStreamWriter {
 
 class VDBStreamReader {
    public:
-	explicit VDBStreamReader(const std::string& inPath);
+	explicit VDBStreamReader(std::string_view inPath);
+	~VDBStreamReader() noexcept = default;
 
 	[[nodiscard]] bool hasNext() const noexcept { return blocksRead_ < metadata_.totalBlocks; }
 	EncodedBatch nextBatch(size_t maxBatch);
 
 	// Accessors for metadata
-	[[nodiscard]] size_t totalBlocks() const { return metadata_.totalBlocks; }
-	[[nodiscard]] const std::vector<int64_t>& latentShape() const { return metadata_.latentShape; }
-	[[nodiscard]] const VQVDBMetadata& getMetadata() const { return metadata_; }
+	[[nodiscard]] size_t totalBlocks() const noexcept { return metadata_.totalBlocks; }
+	[[nodiscard]] const VQVDBMetadata& getMetadata() const noexcept { return metadata_; }
 
 
    private:
-	void refillBuffer() {
-		// Move any remaining partial data to the start of the buffer
-		const size_t remainingBytes = bufferBytes_ - bufferOffset_;
-		if (remainingBytes > 0) {
-			std::memmove(buffer_.data(), buffer_.data() + bufferOffset_, remainingBytes);
-		}
-		bufferOffset_ = 0;
-
-		// Fill the rest of the buffer from the file
-		fileStream_.read(buffer_.data() + remainingBytes, buffer_.size() - remainingBytes);
-		bufferBytes_ = remainingBytes + fileStream_.gcount();
-	}
+	void refillBuffer();
 
 	VQVDBMetadata metadata_;
 	std::ifstream fileStream_;

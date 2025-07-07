@@ -53,8 +53,35 @@ const SOP_NodeVerb::Register<SOP_VQVDB_EncoderVerb> SOP_VQVDB_EncoderVerb::theVe
 
 const SOP_NodeVerb* SOP_VQVDB_Encoder::cookVerb() const { return SOP_VQVDB_EncoderVerb::theVerb.get(); }
 
+
+bool SOP_VQVDB_EncoderCache::initializeCodec() {
+	// If codec already exists, do nothing.
+	if (codec_) {
+		return true;
+	}
+
+	try {
+		auto backend = std::make_shared<TorchBackend>();
+		codec_ = std::make_unique<VQVAECodec>(backend);
+	} catch (const std::exception& e) {
+		codec_.reset();
+		return false;
+	}
+
+	return true;
+}
+
 void SOP_VQVDB_EncoderVerb::cook(const CookParms& cookparms) const {
 	auto& sopparms = cookparms.parms<SOP_VQVDB_EncoderParms>();
+	const auto sopcache = dynamic_cast<SOP_VQVDB_EncoderCache*>(cookparms.cache());
+
+	// init codec if not already initialized
+	if (!sopcache || !sopcache->initializeCodec()) {
+		cookparms.sopAddError(SOP_MESSAGE, "Failed to initialize VQVDB codec.");
+		return;
+	}
+
+
 	const GU_Detail* input_gdp = cookparms.inputGeo(0);
 
 	if (sopparms.getExecute() == 0) {
@@ -90,9 +117,7 @@ void SOP_VQVDB_EncoderVerb::cook(const CookParms& cookparms) const {
 		cookparms.sopAddMessage(SOP_MESSAGE, "Starting VQ-VDB encoding...");
 
 
-		const VQVAECodec codec(std::make_shared<TorchBackend>());
-
-		codec.compress(grid, out_path, batch_size);
+		sopcache->codec_->compress(grid, out_path, batch_size);
 
 		cookparms.sopAddMessage(SOP_MESSAGE, ("Successfully saved to " + out_path).c_str());
 

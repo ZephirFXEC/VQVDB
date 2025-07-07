@@ -14,11 +14,9 @@ class TorchBackend : public IVQVAECodec {
 	explicit TorchBackend();
 	~TorchBackend() override = default;
 
-	torch::Tensor encode(const torch::Tensor& cpuBatch) override;
-	torch::Tensor decode(const torch::Tensor& cpuBatch) override;
+	torch::Tensor encode(const torch::Tensor& cpuBatch) const override;
+	torch::Tensor decode(const torch::Tensor& cpuBatch) const override;
 	const std::vector<int64_t>& getLatentShape() const override { return latentShape_; }
-
-	static std::tuple<torch::jit::Module, torch::jit::Method, torch::jit::Method> load_embedded_model(const torch::Device& device);
 
    private:
 	torch::Device device_;
