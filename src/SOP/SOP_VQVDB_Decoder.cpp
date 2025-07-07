@@ -89,8 +89,6 @@ void SOP_VQVDB_DecoderVerb::cook(const CookParms& cookparms) const {
 		// --- Run Decoder ---
 		cookparms.sopAddMessage(SOP_MESSAGE, "Starting VQ-VDB decoding...");
 
-		const VQVAECodec codec(std::make_shared<TorchBackend>());
-
 		sopcache->codec_->decompress(in_path.data(), output_grid, sopparms.getBatchsize());
 	} catch (const std::exception& e) {
 		cookparms.sopAddError(SOP_MESSAGE, e.what());
