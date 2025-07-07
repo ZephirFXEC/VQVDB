@@ -9,6 +9,7 @@
 #include <SOP/SOP_NodeVerb.h>
 
 #include "SOP_VQVDB_Decoder.proto.h"
+#include "VQVAECodec.hpp"
 
 class SOP_VQVDB_Decoder final : public SOP_Node {
 public:
@@ -39,6 +40,9 @@ class SOP_VQVDB_DecoderCache final : public SOP_NodeCache {
 public:
 	SOP_VQVDB_DecoderCache() : SOP_NodeCache() {}
 	~SOP_VQVDB_DecoderCache() override = default;
+
+	bool initializeCodec();
+	std::unique_ptr<VQVAECodec> codec_;
 };
 
 class SOP_VQVDB_DecoderVerb final : public SOP_NodeVerb {
