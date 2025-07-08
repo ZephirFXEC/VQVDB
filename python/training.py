@@ -1,14 +1,16 @@
 from VQVAE_v2 import *
 
+from torch.optim.lr_scheduler import CosineAnnealingLR
+
 def train(args):
     # Hyperparameters
-    BATCH_SIZE = 8192
+    BATCH_SIZE = 4096
     EPOCHS = 50
     LR = 5e-4
     IN_CHANNELS = 3
     EMBEDDING_DIM = 128  # The dimensionality of the embeddings
-    NUM_EMBEDDINGS = 256  # The size of the codebook (the "dictionary")
-    COMMITMENT_COST = 0.25
+    NUM_EMBEDDINGS = 512  # The size of the codebook (the "dictionary")
+    COMMITMENT_COST = 0.125
     TRAINING_STEPS_WARMUP = 100  # Steps before dead code reset
     RESET_DEAD_CODES_EVERY_N_STEPS = 50  # Frequency of dead
 
@@ -28,7 +30,7 @@ def train(args):
     split_idx = int(len(vdb_dataset) * 0.2)
 
     vdb_dataset_train = torch.utils.data.Subset(vdb_dataset, range(split_idx))
-    vdb_dataset_val = torch.utils.data.Subset(vdb_dataset, range(split_idx//2))
+    vdb_dataset_val = torch.utils.data.Subset(vdb_dataset, range(split_idx//4))
     print(f"Training dataset size: {len(vdb_dataset_train)}")
     print(f"Validation dataset size: {len(vdb_dataset_val)}")
 
@@ -39,7 +41,7 @@ def train(args):
         vdb_dataset_train,
         batch_size=BATCH_SIZE,
         shuffle=True,
-        num_workers=8,
+        num_workers=4,
         pin_memory=True,
         persistent_workers=True,
     )
@@ -51,7 +53,7 @@ def train(args):
 
     model = VQVAE(IN_CHANNELS, EMBEDDING_DIM, NUM_EMBEDDINGS, COMMITMENT_COST).to(device)
     optimizer = Adam(model.parameters(), lr=LR)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
+    scheduler = CosineAnnealingLR(optimizer, T_max=EPOCHS * len(train_loader))
 
     print("Starting training with data from DataLoader...")
     best_val_loss = float('inf')
@@ -78,12 +80,15 @@ def train(args):
             # MODIFIED: Unpack the new return value 'z'
             z, x_recon, vq_loss, perplexity = model(leaves)
 
-            recon_error = F.mse_loss(x_recon, leaves)
-            loss = recon_error + vq_loss
+            recon_error = F.mse_loss(x_recon, leaves)              # magnitude + direction
+            angular    = 1 - F.cosine_similarity(x_recon,   #   direction only
+                                                leaves, dim=1).mean()
+            loss = recon_error + 0.2 * angular + vq_loss
 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
+            scheduler.step()
 
             # Update running losses and perplexity
             total_recon_loss += recon_error.item()
@@ -97,12 +102,7 @@ def train(args):
                 ppl=last_perplexity
             )
 
-            # --- NEW: Periodic Dead Code Reset Logic ---
-            # if global_step > TRAINING_STEPS_WARMUP and global_step % RESET_DEAD_CODES_EVERY_N_STEPS == 0:
-            #    # We pass `z` to the function. Use .detach() as this is a manual, non-gradient operation.
-            #    model.check_and_reset_dead_codes(z)
-
-        global_step += 1 # NEW: Increment the step counter
+            global_step += 1
 
         # Validation phase
         model.eval()
@@ -113,12 +113,12 @@ def train(args):
                 # We don't need 'z' here, so we can ignore it
                 _, x_recon, vq_loss, _ = model(leaves)
                 recon_error = F.mse_loss(x_recon, leaves)
-                val_loss += recon_error.item() + vq_loss.item()
-
+                angular = 1 - F.cosine_similarity(x_recon, leaves, dim=1).mean()
+                val_loss += (recon_error.item() + 0.2 * angular.item() + vq_loss.item())
+                
         avg_train_recon_loss = total_recon_loss / len(train_loader)
         avg_train_vq_loss = total_vq_loss / len(train_loader)
         avg_val_loss = val_loss / len(val_loader)
-        scheduler.step(avg_val_loss)
 
         # Save best model
         if avg_val_loss < best_val_loss:

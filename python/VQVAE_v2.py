@@ -161,9 +161,9 @@ class VectorQuantizerEMA(nn.Module):
         return quantized, loss, perplexity
 
 
-class Encoder(nn.Module):
+class EncoderFloat(nn.Module):
     def __init__(self, in_channels, embedding_dim):
-        super(Encoder, self).__init__()
+        super(EncoderFloat, self).__init__()
         self.net = nn.Sequential(
             # 8³ → 4³
             nn.Conv3d(in_channels, 32, kernel_size=4, stride=2, padding=1),
@@ -183,32 +183,23 @@ class Encoder(nn.Module):
         return self.net(x)
 
 
-class Decoder(nn.Module):
-    def __init__(self, embedding_dim, out_channels):
-        super(Decoder, self).__init__()
+class EncoderVec3(nn.Module):
+    def __init__(self, in_channels, embedding_dim):
+        super(EncoderVec3, self).__init__()
         self.net = nn.Sequential(
-            # Expand from embedding_dim
-            nn.Conv3d(embedding_dim, 64, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm3d(64),
-            nn.ReLU(inplace=True),
-
-            # 4³ → 8³
-            nn.ConvTranspose3d(64, 32, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm3d(32),
-            nn.ReLU(inplace=True),
-
-            # Final reconstruction
-            nn.Conv3d(32, out_channels, kernel_size=3, stride=1, padding=1),
-            nn.Tanh(),
+            nn.Conv3d(in_channels, 64, 4, 2, 1),
+            nn.GroupNorm(8, 64), nn.ReLU(inplace=True),
+            nn.Conv3d(64, 128, 3, 1, 1),
+            nn.GroupNorm(8, 128), nn.ReLU(inplace=True),
+            nn.Conv3d(128, embedding_dim, 3, 1, 1),
         )
 
     def forward(self, x):
         return self.net(x)
 
-
-""" class Decoder(nn.Module):
+class DecoderFloat(nn.Module):
     def __init__(self, embedding_dim, out_channels):
-        super(Decoder, self).__init__()
+        super(DecoderFloat, self).__init__()
         self.net = nn.Sequential(
             # Expand from embedding_dim
             nn.Conv3d(embedding_dim, 64, kernel_size=3, stride=1, padding=1),
@@ -228,14 +219,30 @@ class Decoder(nn.Module):
     def forward(self, x):
         return self.net(x)
 
- """
+
+
+class DecoderVec3(nn.Module):
+    def __init__(self, embedding_dim: int, out_channels: int):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv3d(embedding_dim, 128, 3, 1, 1),
+            nn.GroupNorm(8, 128), nn.ReLU(inplace=True),
+            nn.ConvTranspose3d(128, 64, 4, 2, 1),
+            nn.GroupNorm(8, 64), nn.ReLU(inplace=True),
+            nn.Conv3d(64, out_channels, 3, 1, 1),
+            nn.Tanh(),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
 
 class VQVAE(nn.Module):
     def __init__(self, in_channels, embedding_dim, num_embeddings, commitment_cost):
         super(VQVAE, self).__init__()
-        self.encoder = Encoder(in_channels, embedding_dim)
+        self.encoder = in_channels == 1 and EncoderFloat(in_channels, embedding_dim) or EncoderVec3(in_channels, embedding_dim)
         self.quantizer = VectorQuantizerEMA(num_embeddings, embedding_dim, commitment_cost)
-        self.decoder = Decoder(embedding_dim, in_channels)
+        self.decoder = in_channels == 1 and DecoderFloat(embedding_dim, in_channels) or DecoderVec3(embedding_dim, in_channels)
 
     def forward(self, x):
         z = self.encoder(x)
