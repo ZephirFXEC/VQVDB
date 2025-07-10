@@ -4,15 +4,15 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 
 def train(args):
     # Hyperparameters
-    BATCH_SIZE = 4096
-    EPOCHS = 50
-    LR = 5e-4
+    BATCH_SIZE = 1024
+    EPOCHS = 75
+    LR = 1e-4
     IN_CHANNELS = 3
-    EMBEDDING_DIM = 128  # The dimensionality of the embeddings
-    NUM_EMBEDDINGS = 512  # The size of the codebook (the "dictionary")
-    COMMITMENT_COST = 0.125
-    TRAINING_STEPS_WARMUP = 100  # Steps before dead code reset
-    RESET_DEAD_CODES_EVERY_N_STEPS = 50  # Frequency of dead
+    EMBEDDING_DIM = 256  # The dimensionality of the embeddings
+    NUM_EMBEDDINGS = 4096  # The size of the codebook (the "dictionary")
+    COMMITMENT_COST = 0.5
+    EPOCH_WARMUP = 20  # Steps before dead code reset
+    RESET_DEAD_CODES_EVERY_N_EPOCH = 8 # Frequency of dead
 
     device = torch.device("cuda")
     print(f"Using device: {device}")
@@ -24,13 +24,15 @@ def train(args):
     print(f"Found {len(npy_files)} .npy files")
 
     vdb_dataset = VDBLeafDataset(npy_files=npy_files, include_origins=False, in_channels=IN_CHANNELS)
+    #vdb_dataset = torch.utils.data.Subset(vdb_dataset, range(0, len(vdb_dataset), 2))  # Subsample to reduce dataset size
     print(f"Dataset created with {len(vdb_dataset)} total blocks.")
 
-    # keep 10% of the dataset for validation
-    split_idx = int(len(vdb_dataset) * 0.2)
-
-    vdb_dataset_train = torch.utils.data.Subset(vdb_dataset, range(split_idx))
-    vdb_dataset_val = torch.utils.data.Subset(vdb_dataset, range(split_idx//4))
+    # Split dataset randomly with 90% for training and 10% for validation
+    train_size = int(0.8 * len(vdb_dataset))
+    val_size = len(vdb_dataset) - train_size
+    vdb_dataset_train, vdb_dataset_val = torch.utils.data.random_split(
+        vdb_dataset, [train_size, val_size]
+    )
     print(f"Training dataset size: {len(vdb_dataset_train)}")
     print(f"Validation dataset size: {len(vdb_dataset_val)}")
 
@@ -41,7 +43,7 @@ def train(args):
         vdb_dataset_train,
         batch_size=BATCH_SIZE,
         shuffle=True,
-        num_workers=4,
+        num_workers=2,
         pin_memory=True,
         persistent_workers=True,
     )
@@ -57,7 +59,6 @@ def train(args):
 
     print("Starting training with data from DataLoader...")
     best_val_loss = float('inf')
-    global_step = 0  # NEW: Initialize a global step counter
 
 
     recon_loss_l = []  # List to store reconstruction losses
@@ -72,23 +73,18 @@ def train(args):
 
         # Use a progress bar for the training loop
         pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{EPOCHS}", leave=False)
-        for leaves in pbar:
-            leaves = leaves.to(device, non_blocking=True)
+        for batch in pbar:
+            leaves_norm = batch
+            leaves_norm = leaves_norm.to(device, non_blocking=True)
 
             optimizer.zero_grad()
 
-            # MODIFIED: Unpack the new return value 'z'
-            z, x_recon, vq_loss, perplexity = model(leaves)
-
-            recon_error = F.mse_loss(x_recon, leaves)              # magnitude + direction
-            angular    = 1 - F.cosine_similarity(x_recon,   #   direction only
-                                                leaves, dim=1).mean()
-            loss = recon_error + 0.2 * angular + vq_loss
+            z, recon_norm, vq_loss, perplexity = model(leaves_norm)
+            recon_error = F.mse_loss(recon_norm, leaves_norm)
+            loss = recon_error + vq_loss
 
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
-            scheduler.step()
 
             # Update running losses and perplexity
             total_recon_loss += recon_error.item()
@@ -101,23 +97,26 @@ def train(args):
                 vq_loss=vq_loss.item(),
                 ppl=last_perplexity
             )
+            
+        scheduler.step()
+            
+        if (epoch+1) == 25:
+            model.check_and_reset_dead_codes(z)
 
-            global_step += 1
 
         # Validation phase
         model.eval()
         val_loss = 0.0
         with torch.no_grad():
-            for leaves in val_loader:
-                leaves = leaves.to(device)
-                # We don't need 'z' here, so we can ignore it
-                _, x_recon, vq_loss, _ = model(leaves)
-                recon_error = F.mse_loss(x_recon, leaves)
-                angular = 1 - F.cosine_similarity(x_recon, leaves, dim=1).mean()
-                val_loss += (recon_error.item() + 0.2 * angular.item() + vq_loss.item())
+            for batch in val_loader:
+                leaves_norm = batch
+                leaves_norm = leaves_norm.to(device)
+                _, recon_norm, vq_loss, _ = model(leaves_norm)
+                recon_error = F.mse_loss(recon_norm, leaves_norm)
+                val_loss += recon_error.item() + vq_loss.item()
                 
-        avg_train_recon_loss = total_recon_loss / len(train_loader)
-        avg_train_vq_loss = total_vq_loss / len(train_loader)
+        avg_train_recon = total_recon_loss / len(train_loader)
+        avg_train_vq = total_vq_loss / len(train_loader)
         avg_val_loss = val_loss / len(val_loader)
 
         # Save best model
@@ -130,20 +129,19 @@ def train(args):
             torch.save(state, args.model_path)
 
         print(f"\nEpoch {epoch + 1}/{EPOCHS}, "
-              f"Train Recon Loss: {avg_train_recon_loss:.4f}, "
-              f"Train VQ Loss: {avg_train_vq_loss:.4f}, "
-              f"Val Loss: {avg_val_loss:.4f}, "
-              f"Perplexity: {last_perplexity:.2f}")
+              f"Train Recon Loss: {avg_train_recon:.6f}, "
+              f"Train VQ Loss: {avg_train_vq:.6f}, "
+              f"Val Loss: {avg_val_loss:.6f}, "
+              f"Perplexity: {last_perplexity:.6f}")
 
-        recon_loss_l.append(avg_train_recon_loss)
-        vq_loss_l.append(avg_train_vq_loss)
+        recon_loss_l.append(avg_train_recon)
+        vq_loss_l.append(avg_train_vq)
         perplexity_l.append(last_perplexity)
-
-
 
     state = {'epoch': epoch + 1, 'state_dict': model.state_dict(),
              'optimizer': optimizer.state_dict(), 'scheduler': scheduler.state_dict(), "recon_loss_l": recon_loss_l,
              "vq_loss_l": vq_loss_l, "perplexity_l": perplexity_l}
+    
     os.makedirs(os.path.dirname(args.model_path), exist_ok=True)
     torch.save(state, args.model_path)
 

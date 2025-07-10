@@ -71,29 +71,24 @@ class VDBLeafDataset(Dataset):
         leaf = torch.from_numpy(leaf_np)
 
         if self.in_channels == 1:
-            # Scalar data: add a channel dimension
-            # Shape: (8, 8, 8) -> (1, 8, 8, 8)
-            leaf = leaf.unsqueeze(0)
+            leaf = leaf.unsqueeze(0)  # (1, 8, 8, 8)
         else:
-            # Vector data: permute from channels-last to channels-first
-            # Shape: (8, 8, 8, 3) -> (3, 8, 8, 8)
-            leaf = leaf.permute(3, 0, 1, 2)
+            leaf = leaf.permute(3, 0, 1, 2)  # (C, 8, 8, 8)
+
 
         if self.transform:
-            leaf = self.transform(leaf)
+            leaf_norm = self.transform(leaf_norm)
 
         if self.include_origins:
-            origin = torch.from_numpy(
-                self.origin_arrays[file_idx][local_idx].astype(np.int32, copy=False)
-            )
-            return leaf, origin
+            origin = torch.from_numpy(self.origin_arrays[file_idx][local_idx].astype(np.int32, copy=False))  # type: ignore[index]
+            return leaf_norm, origin
         return leaf
 
 
 
 class VectorQuantizerEMA(nn.Module):
     def __init__(self, num_embeddings: int, embedding_dim: int,
-                 commitment_cost: float, decay: float = 0.99, eps: float = 1e-5):
+                 commitment_cost: float, decay: float = 0.95, eps: float = 1e-4):
         super().__init__()
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
@@ -106,7 +101,7 @@ class VectorQuantizerEMA(nn.Module):
         embed = F.normalize(embed, dim=1)
 
         self.register_buffer('embedding', embed)
-        self.register_buffer('cluster_size', torch.ones(num_embeddings))
+        self.register_buffer('cluster_size', torch.zeros(num_embeddings))
         self.register_buffer('embed_avg', embed.clone().detach())
 
     def forward(self, x) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -161,80 +156,157 @@ class VectorQuantizerEMA(nn.Module):
         return quantized, loss, perplexity
 
 
+class ResidualBlock(nn.Module):
+    """Generic 3D residual block for reuse."""
+    def __init__(self, channels, norm_layer):
+        super().__init__()
+        self.conv1 = nn.Conv3d(channels, channels, kernel_size=3, stride=1, padding=1)
+        self.norm1 = norm_layer(channels)
+        self.relu = nn.ReLU(inplace=True)
+        self.conv2 = nn.Conv3d(channels, channels, kernel_size=3, stride=1, padding=1)
+        self.norm2 = norm_layer(channels)
+
+    def forward(self, x):
+        residual = x
+        x = self.conv1(x)
+        x = self.norm1(x)
+        x = self.relu(x)
+        x = self.conv2(x)
+        x = self.norm2(x)
+        return x + residual  # Shortcut connection
+
 class EncoderFloat(nn.Module):
     def __init__(self, in_channels, embedding_dim):
-        super(EncoderFloat, self).__init__()
-        self.net = nn.Sequential(
-            # 8³ → 4³
+        super().__init__()
+        # Downsample: 8^3 -> 4^3
+        self.downsample = nn.Sequential(
             nn.Conv3d(in_channels, 32, kernel_size=4, stride=2, padding=1),
             nn.BatchNorm3d(32),
-            nn.ReLU(inplace=True),
-
-            # Refine at 4³
-            nn.Conv3d(32, 64, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm3d(64),
-            nn.ReLU(inplace=True),
-
-            # Final projection
-            nn.Conv3d(64, embedding_dim, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(inplace=True)
         )
+        # Refine with residual block
+        self.residual1 = ResidualBlock(32, nn.BatchNorm3d)
+        self.residual2 = ResidualBlock(32, nn.BatchNorm3d)  # Second for depth
+        # Self-attention (adapted for 3D)
+        self.attention = nn.MultiheadAttention(embed_dim=32, num_heads=4)
+        # Final projection to embedding_dim
+        self.final = nn.Conv3d(32, embedding_dim, kernel_size=3, stride=1, padding=1)
 
     def forward(self, x):
-        return self.net(x)
-
-
-class EncoderVec3(nn.Module):
-    def __init__(self, in_channels, embedding_dim):
-        super(EncoderVec3, self).__init__()
-        self.net = nn.Sequential(
-            nn.Conv3d(in_channels, 64, 4, 2, 1),
-            nn.GroupNorm(8, 64), nn.ReLU(inplace=True),
-            nn.Conv3d(64, 128, 3, 1, 1),
-            nn.GroupNorm(8, 128), nn.ReLU(inplace=True),
-            nn.Conv3d(128, embedding_dim, 3, 1, 1),
-        )
-
-    def forward(self, x):
-        return self.net(x)
+        x = self.downsample(x)  # Shape: (B, 32, 4, 4, 4)
+        x = self.residual1(x)
+        x = self.residual2(x)
+        # Attention: Flatten spatial to sequence and permute to (seq_len, B, embed_dim)
+        B, C, D, H, W = x.shape
+        seq_len = D * H * W  # 64 for 4x4x4
+        x_flat = x.view(B, C, seq_len).permute(2, 0, 1)  # (seq_len, B, C=32) - FIXED!
+        x_att, _ = self.attention(x_flat, x_flat, x_flat)  # Self-attention; returns (seq_len, B, C)
+        x = x_att.permute(1, 2, 0).view(B, C, D, H, W)  # Reshape back - FIXED!
+        return self.final(x)  # Shape: (B, embedding_dim, 4, 4, 4)
 
 class DecoderFloat(nn.Module):
     def __init__(self, embedding_dim, out_channels):
-        super(DecoderFloat, self).__init__()
-        self.net = nn.Sequential(
-            # Expand from embedding_dim
-            nn.Conv3d(embedding_dim, 64, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm3d(64),
-            nn.ReLU(inplace=True),
+        super().__init__()
+        # Initial expansion
+        self.initial = nn.Conv3d(embedding_dim, 64, kernel_size=3, stride=1, padding=1)
+        self.norm_initial = nn.BatchNorm3d(64)
+        self.relu = nn.ReLU(inplace=True)
+        # Refine with residual block
+        self.residual1 = ResidualBlock(64, nn.BatchNorm3d)
+        self.residual2 = ResidualBlock(64, nn.BatchNorm3d)  # Second for depth
+        # Self-attention (adapted for 3D)
+        self.attention = nn.MultiheadAttention(embed_dim=64, num_heads=4)
+        # Upsample: 4^3 -> 8^3
+        self.upsample = nn.ConvTranspose3d(64, 32, kernel_size=4, stride=2, padding=1)
+        self.norm_upsample = nn.BatchNorm3d(32)
+        # Final reconstruction
+        self.final = nn.Conv3d(32, out_channels, kernel_size=3, stride=1, padding=1)
+        self.activation = nn.Sigmoid()  # For (0,1) range
 
-            # 4³ → 8³
-            nn.ConvTranspose3d(64, 32, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm3d(32),
-            nn.ReLU(inplace=True),
+    def forward(self, x):  # Input: (B, embedding_dim, 4, 4, 4)
+        x = self.initial(x)
+        x = self.norm_initial(x)
+        x = self.relu(x)
+        x = self.residual1(x)
+        x = self.residual2(x)
+        # Attention: Flatten spatial to sequence and permute to (seq_len, B, embed_dim)
+        B, C, D, H, W = x.shape
+        seq_len = D * H * W  # 64 for 4x4x4
+        x_flat = x.view(B, C, seq_len).permute(2, 0, 1)  # (seq_len, B, C=64) - FIXED!
+        x_att, _ = self.attention(x_flat, x_flat, x_flat)  # Self-attention; returns (seq_len, B, C)
+        x = x_att.permute(1, 2, 0).view(B, C, D, H, W)  # Reshape back - FIXED!
+        x = self.upsample(x)  # Shape: (B, 32, 8, 8, 8)
+        x = self.norm_upsample(x)
+        x = self.relu(x)
+        x = self.final(x)
+        return self.activation(x)  # Shape: (B, out_channels, 8, 8, 8)
 
-            # Final reconstruction
-            nn.Conv3d(32, out_channels, kernel_size=3, stride=1, padding=1),
-            nn.Sigmoid(),
+# Vec3 versions (for completeness, with same fixes - ignore if focusing on floats)
+class EncoderVec3(nn.Module):
+    def __init__(self, in_channels, embedding_dim):
+        super().__init__()
+        # Downsample: 8^3 -> 4^3
+        self.downsample = nn.Sequential(
+            nn.Conv3d(in_channels, 64, kernel_size=4, stride=2, padding=1),
+            nn.GroupNorm(8, 64),
+            nn.ReLU(inplace=True)
         )
+        # Refine with residual block
+        self.residual1 = ResidualBlock(64, lambda c: nn.GroupNorm(8, c))
+        self.residual2 = ResidualBlock(64, lambda c: nn.GroupNorm(8, c))  # Second for depth
+        # Self-attention (adapted for 3D)
+        self.attention = nn.MultiheadAttention(embed_dim=64, num_heads=4)
+        # Final projection to embedding_dim
+        self.final = nn.Conv3d(64, embedding_dim, kernel_size=3, stride=1, padding=1)
 
     def forward(self, x):
-        return self.net(x)
-
-
+        x = self.downsample(x)  # Shape: (B, 64, 4, 4, 4)
+        x = self.residual1(x)
+        x = self.residual2(x)
+        # Attention: Flatten and permute correctly
+        B, C, D, H, W = x.shape
+        seq_len = D * H * W
+        x_flat = x.view(B, C, seq_len).permute(2, 0, 1)  # (seq_len, B, 64)
+        x_att, _ = self.attention(x_flat, x_flat, x_flat)
+        x = x_att.permute(1, 2, 0).view(B, C, D, H, W)
+        return self.final(x)
 
 class DecoderVec3(nn.Module):
-    def __init__(self, embedding_dim: int, out_channels: int):
+    def __init__(self, embedding_dim, out_channels):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv3d(embedding_dim, 128, 3, 1, 1),
-            nn.GroupNorm(8, 128), nn.ReLU(inplace=True),
-            nn.ConvTranspose3d(128, 64, 4, 2, 1),
-            nn.GroupNorm(8, 64), nn.ReLU(inplace=True),
-            nn.Conv3d(64, out_channels, 3, 1, 1),
-            nn.Tanh(),
-        )
+        # Initial expansion
+        self.initial = nn.Conv3d(embedding_dim, 128, kernel_size=3, stride=1, padding=1)
+        self.norm_initial = nn.GroupNorm(8, 128)
+        self.relu = nn.ReLU(inplace=True)
+        # Refine with residual block
+        self.residual1 = ResidualBlock(128, lambda c: nn.GroupNorm(8, c))
+        self.residual2 = ResidualBlock(128, lambda c: nn.GroupNorm(8, c))  # Second for depth
+        # Self-attention (adapted for 3D)
+        self.attention = nn.MultiheadAttention(embed_dim=128, num_heads=4)
+        # Upsample: 4^3 -> 8^3
+        self.upsample = nn.ConvTranspose3d(128, 64, kernel_size=4, stride=2, padding=1)
+        self.norm_upsample = nn.GroupNorm(8, 64)
+        # Final reconstruction
+        self.final = nn.Conv3d(64, out_channels, kernel_size=3, stride=1, padding=1)
+        self.activation = nn.Tanh()  # For (-1,1) range
 
-    def forward(self, x):
-        return self.net(x)
+    def forward(self, x):  # Input: (B, embedding_dim, 4, 4, 4)
+        x = self.initial(x)
+        x = self.norm_initial(x)
+        x = self.relu(x)
+        x = self.residual1(x)
+        x = self.residual2(x)
+        # Attention: Flatten and permute correctly
+        B, C, D, H, W = x.shape
+        seq_len = D * H * W
+        x_flat = x.view(B, C, seq_len).permute(2, 0, 1)  # (seq_len, B, 128)
+        x_att, _ = self.attention(x_flat, x_flat, x_flat)
+        x = x_att.permute(1, 2, 0).view(B, C, D, H, W)
+        x = self.upsample(x)  # Shape: (B, 64, 8, 8, 8)
+        x = self.norm_upsample(x)
+        x = self.relu(x)
+        x = self.final(x)
+        return self.activation(x)
 
 
 class VQVAE(nn.Module):
