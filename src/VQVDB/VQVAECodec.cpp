@@ -72,124 +72,127 @@ VQVAECodec::VQVAECodec(const std::shared_ptr<IVQVAECodec>& backend) : backend_(b
 	}
 }
 
-void VQVAECodec::compress(const openvdb::FloatGrid::Ptr& grid, const std::string& outPath, const size_t batchSize) const {
+void VQVAECodec::compress(const std::vector<openvdb::FloatGrid::Ptr>& grids, const std::string& outPath, const size_t batchSize) const {
 	const auto t0 = std::chrono::high_resolution_clock::now();
 
-	const openvdb::tree::LeafManager<openvdb::FloatTree> leafMgr(grid->tree());
-	const int64_t totalBlocks = leafMgr.leafCount();
+	VDBStreamWriter writer(outPath);
 
-	if (totalBlocks == 0) {
-		std::cout << "Grid has no active voxels. Nothing to compress.\n";
-		return;
+	for (size_t g = 0; g < grids.size(); ++g) {
+		const auto& grid = grids[g];
+		const std::string name = grid->getName();
+		const openvdb::tree::LeafManager<openvdb::FloatTree> leafMgr(grid->tree());
+		const int64_t totalBlocks = leafMgr.leafCount();
+
+		if (totalBlocks == 0) {
+			std::cout << "Grid '" << name << "' has no active voxels. Skipping.\n";
+			continue;
+		}
+
+		// Gather metadata
+		VQVDBMetadata metadata;
+		metadata.name = name;
+		metadata.fileVersion = 3;
+		metadata.numEmbeddings = 256;  // Assuming fixed codebook size
+		metadata.latentShape = backend_->getLatentShape();
+		metadata.totalBlocks = totalBlocks;
+		metadata.voxelSize = grid->voxelSize();
+		metadata.transform = grid->transform().baseMap()->getAffineMap()->getMat4();
+
+		writer.startGrid(metadata);
+
+		VDBInputBlockStreamer streamer(leafMgr);
+		int64_t blocksProcessed = 0;
+
+		while (streamer.hasNext()) {
+			auto [hostTensor, origins] = streamer.nextBatch(batchSize);
+			if (hostTensor.numel() == 0) break;
+
+			torch::Tensor encodedIndices = this->encodeBatch(hostTensor);
+			writer.writeBatch(encodedIndices, origins);
+
+			blocksProcessed += hostTensor.size(0);
+			fprintf(stderr, "\rGrid '%s': Processed %lld / %lld blocks...", name.c_str(), (long long)blocksProcessed, totalBlocks);
+		}
+		fprintf(stderr, "\n");
+
+		writer.endGrid();
 	}
-
-	// --- Gather all metadata for the VQVDB file header ---
-	VQVDBMetadata metadata;
-	metadata.fileVersion = 2;
-	metadata.numEmbeddings = 256;  // Assuming a fixed codebook size
-	metadata.latentShape = backend_->getLatentShape();
-	metadata.totalBlocks = totalBlocks;
-	metadata.voxelSize = grid->voxelSize();
-	metadata.transform = grid->transform().baseMap()->getAffineMap()->getMat4();
-
-	VDBStreamWriter writer(outPath, metadata);
-	VDBInputBlockStreamer streamer(leafMgr);
-
-
-	const auto t1 = std::chrono::high_resolution_clock::now();
-	std::cout << "Starting compression of " << totalBlocks << " blocks with batch size " << batchSize << "...\n";
-	int64_t blocksProcessed = 0;
-
-	while (streamer.hasNext()) {
-		auto [hostTensor, origins] = streamer.nextBatch(batchSize);
-		if (hostTensor.numel() == 0) break;
-
-		torch::Tensor encodedIndices = this->encodeBatch(hostTensor);
-		writer.writeBatch(encodedIndices, origins);
-
-		blocksProcessed += hostTensor.size(0);
-		fprintf(stderr, "\rProcessed %lld / %lld blocks...", (long long)blocksProcessed, totalBlocks);
-	}
-
-	fprintf(stderr, "\n");
 
 	const auto t2 = std::chrono::high_resolution_clock::now();
-	const auto setup_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
-	const auto compress_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count();
-	printf("\nCompression Complete.\n-- Setup  : %lld ms\n-- Encode : %lld ms\n", setup_ms, compress_ms);
+	const auto compress_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t0).count();
+	printf("\nMulti-Grid Compression Complete in %lld ms.\n", compress_ms);
 }
 
 
-void VQVAECodec::decompress(const std::string& inPath, openvdb::FloatGrid::Ptr& grid, const size_t batchSize) const {
+void VQVAECodec::decompress(const std::string& inPath, std::vector<openvdb::FloatGrid::Ptr>& grids, const size_t batchSize) const {
 	const auto t0 = std::chrono::high_resolution_clock::now();
 
-	VDBStreamReader streamer(inPath);
-	const VQVDBMetadata& metadata = streamer.getMetadata();
-	std::cout << "Starting decompression ...\n";
+	VDBStreamReader reader(inPath);
+	grids.clear();
 
-	// Create the final grid and apply the metadata read from the file
-	grid = openvdb::FloatGrid::create();
-	auto transform = openvdb::math::Transform::createLinearTransform(metadata.transform);
-	grid->setTransform(transform);
-	const int64_t totalBlocks = streamer.totalBlocks();
-
-	const auto t1 = std::chrono::high_resolution_clock::now();
-	std::cout << "Starting decompression of " << totalBlocks << " blocks with batch size " << batchSize << "...\n";
-
-	// Determine number of threads and create separate grids
 	const size_t numThreads = tbb::task_scheduler_init::default_num_threads();
-	std::vector<openvdb::FloatGrid::Ptr> threadGrids(numThreads);
-	std::vector<openvdb::tree::ValueAccessor<openvdb::FloatTree>> threadAccessors;
 
-	for (size_t i = 0; i < numThreads; ++i) {
-		threadGrids[i] = openvdb::FloatGrid::create();
-		threadGrids[i]->setTransform(transform);
-		threadAccessors.emplace_back(threadGrids[i]->getAccessor());
-	}
+	while (reader.hasNextGrid()) {
+		VQVDBMetadata metadata = reader.nextGridMetadata();
+		const int64_t totalBlocks = metadata.totalBlocks;
 
-	std::atomic<int64_t> blocksProcessed = 0;
+		std::cout << "Decompressing grid '" << metadata.name << "' with " << totalBlocks << " blocks...\n";
 
-	while (streamer.hasNext()) {
-		EncodedBatch batch = streamer.nextBatch(batchSize);
-		if (batch.data.numel() == 0) break;
+		auto grid = openvdb::FloatGrid::create();
+		auto transform = openvdb::math::Transform::createLinearTransform(metadata.transform);
+		grid->setTransform(transform);
+		grid->setName(metadata.name);
 
-		const size_t numInBatch = batch.origins.size();
-		torch::Tensor decodedData = this->decodeBatch(batch.data);
-		const float* decodedDataPtr = decodedData.data_ptr<float>();
-
-		tbb::parallel_for(tbb::blocked_range<size_t>(0, numInBatch), [&](const tbb::blocked_range<size_t>& r) {
-			const size_t threadId = tbb::this_task_arena::current_thread_index() % numThreads;
-			auto& accessor = threadAccessors[threadId];
-
-			for (size_t i = r.begin(); i != r.end(); ++i) {
-				if (auto* leaf = accessor.touchLeaf(batch.origins[i])) {
-					const float* src = decodedDataPtr + i * LEAF_VOXELS;
-					std::memcpy(leaf->buffer().data(), src, LEAF_VOXELS * sizeof(float));
-					leaf->setValuesOn();
-				}
-			}
-		});
-
-		blocksProcessed += numInBatch;
-		fprintf(stderr, "\rProcessed %lld / %lld blocks...", static_cast<long long>(blocksProcessed), totalBlocks);
-	}
-	fprintf(stderr, "\n");
-
-	const auto t2 = std::chrono::high_resolution_clock::now();
-
-	// Merge all thread grids into the final grid
-	std::cout << "Merging grids from " << numThreads << " threads...\n";
-	for (size_t i = 0; i < numThreads; ++i) {
-		if (threadGrids[i]->activeVoxelCount() > 0) {
-			grid->tree().merge(threadGrids[i]->tree());
+		// Thread-local grids for parallel insertion
+		std::vector<openvdb::FloatGrid::Ptr> threadGrids(numThreads);
+		std::vector<openvdb::tree::ValueAccessor<openvdb::FloatTree>> threadAccessors;
+		for (size_t i = 0; i < numThreads; ++i) {
+			threadGrids[i] = openvdb::FloatGrid::create();
+			threadGrids[i]->setTransform(transform);
+			threadAccessors.emplace_back(threadGrids[i]->getAccessor());
 		}
+
+		std::atomic<int64_t> blocksProcessed = 0;
+
+		while (reader.hasNext()) {
+			EncodedBatch batch = reader.nextBatch(batchSize);
+			if (batch.data.numel() == 0) break;
+
+			const size_t numInBatch = batch.origins.size();
+			torch::Tensor decodedData = this->decodeBatch(batch.data);
+			const float* decodedDataPtr = decodedData.data_ptr<float>();
+
+			tbb::parallel_for(tbb::blocked_range<size_t>(0, numInBatch), [&](const tbb::blocked_range<size_t>& r) {
+				const size_t threadId = tbb::this_task_arena::current_thread_index() % numThreads;
+				auto& accessor = threadAccessors[threadId];
+
+				for (size_t i = r.begin(); i != r.end(); ++i) {
+					if (auto* leaf = accessor.touchLeaf(batch.origins[i])) {
+						const float* src = decodedDataPtr + i * LEAF_VOXELS;
+						std::memcpy(leaf->buffer().data(), src, LEAF_VOXELS * sizeof(float));
+						leaf->setValuesOn();
+					}
+				}
+			});
+
+			blocksProcessed += numInBatch;
+			fprintf(stderr, "\rProcessed %lld / %lld blocks...", static_cast<long long>(blocksProcessed), totalBlocks);
+		}
+		fprintf(stderr, "\n");
+
+		// Merge thread grids into main grid
+		for (size_t i = 0; i < numThreads; ++i) {
+			if (threadGrids[i]->activeVoxelCount() > 0) {
+				grid->tree().merge(threadGrids[i]->tree());
+			}
+		}
+
+		grids.push_back(grid);
 	}
 
 	const auto t3 = std::chrono::high_resolution_clock::now();
-	const auto setup_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
-	const auto decompress_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count();
-	const auto merge_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t3 - t2).count();
-	printf("\nDecompression Complete.\n-- Setup  : %lld ms\n-- Decode : %lld ms\n-- Merge : %lld ms\n", setup_ms, decompress_ms, merge_ms);
+	const auto decompress_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t3 - t0).count();
+	printf("\nMulti-Grid Decompression Complete in %lld ms.\n", decompress_ms);
 }
 
 torch::Tensor VQVAECodec::encodeBatch(const torch::Tensor& cpuBatch) const { return backend_->encode(cpuBatch); }
