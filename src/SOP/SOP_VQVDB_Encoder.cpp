@@ -104,20 +104,29 @@ void SOP_VQVDB_EncoderVerb::cook(const CookParms& cookparms) const {
 		}
 
 		// --- Load Grid ---
-		openvdb::FloatGrid::Ptr grid;
-		if (auto err = loadGrid<openvdb::FloatGrid>(input_gdp, grid, sopparms.getVdbname()); err != UT_ERROR_NONE) {
+		std::vector<openvdb::GridBase::Ptr> grids;
+		if (const auto err = loadGrid(input_gdp, grids); err != UT_ERROR_NONE) {
 			cookparms.sopAddError(SOP_MESSAGE, "Failed to load VDB grid from input.");
 		}
-		if (!grid) {
+		if (grids.empty()) {
 			cookparms.sopAddError(SOP_MESSAGE, "VDB grid is null or not found.");
 			return;
+		}
+
+		std::vector<openvdb::FloatGrid::Ptr> float_grids;
+		for (const auto& grid : grids) {
+			if (auto float_grid = openvdb::gridPtrCast<openvdb::FloatGrid>(grid)) {
+				float_grids.push_back(float_grid);
+			} else {
+				cookparms.sopAddError(SOP_MESSAGE, ("Skipped non-float grid: " + grid->getName()).c_str());
+				return;
+			}
 		}
 
 		// --- Run Encoder ---
 		cookparms.sopAddMessage(SOP_MESSAGE, "Starting VQ-VDB encoding...");
 
-
-		sopcache->codec_->compress(grid, out_path, batch_size);
+		sopcache->codec_->compress(float_grids, out_path, batch_size);
 
 		cookparms.sopAddMessage(SOP_MESSAGE, ("Successfully saved to " + out_path).c_str());
 

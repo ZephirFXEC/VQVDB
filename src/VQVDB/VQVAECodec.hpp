@@ -34,11 +34,11 @@ class VQVAECodec {
 	 * and writes the result to a file. The file format stores all block origins
 	 * first, followed by the concatenated stream of encoded data.
 	 *
-	 * @param grid The input grid to compress.
+	 * @param grids A vector of OpenVDB FloatGrids to compress.
 	 * @param outPath The path for the output .vqvdb file.
 	 * @param batchSize The number of leaf blocks to process in a single GPU batch.
 	 */
-	void compress(const openvdb::FloatGrid::Ptr& grid, const std::string& outPath, size_t batchSize) const;
+	void compress(const std::vector<openvdb::FloatGrid::Ptr>& grids, const std::string& outPath, size_t batchSize) const;
 
 	/**
 	 * @brief Decompresses a .vqvdb file into an OpenVDB FloatGrid.
@@ -48,10 +48,10 @@ class VQVAECodec {
 	 * encoded data at once.
 	 *
 	 * @param inPath The path to the input .vqvdb file.
-	 * @param grid A pointer to a FloatGrid which will be created and populated.
+	 * @param grids A vector of OpenVDB FloatGrids which will be created and populated.
 	 * @param batchSize The number of leaf blocks to process in a single GPU batch.
 	 */
-	void decompress(const std::string& inPath, openvdb::FloatGrid::Ptr& grid, size_t batchSize) const;
+	void decompress(const std::string& inPath, std::vector<openvdb::FloatGrid::Ptr>& grids, size_t batchSize) const;
 
    private:
 	/**
@@ -59,14 +59,14 @@ class VQVAECodec {
 	 * @param cpuBatch A pinned CPU tensor of shape [B, 1, D, D, D] with float32 data.
 	 * @return A CPU tensor of shape [B, H, W] (or similar) with uint8 quantized indices.
 	 */
-	torch::Tensor encodeBatch(const torch::Tensor& cpuBatch) const;
+	[[nodiscard]] torch::Tensor encodeBatch(const torch::Tensor& cpuBatch) const;
 
 	/**
 	 * @brief Decodes a batch of quantized indices.
 	 * @param cpuBatch A CPU tensor of shape [B, H, W] (or similar) with uint8 quantized indices.
 	 * @return A CPU tensor of shape [B, 1, D, D, D] with float32 reconstructed data.
 	 */
-	torch::Tensor decodeBatch(const torch::Tensor& cpuBatch) const;
+	[[nodiscard]] torch::Tensor decodeBatch(const torch::Tensor& cpuBatch) const;
 
 	std::shared_ptr<IVQVAECodec> backend_;
 };
