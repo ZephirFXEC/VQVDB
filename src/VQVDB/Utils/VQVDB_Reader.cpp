@@ -96,12 +96,12 @@ void VDBStreamWriter::startGrid(const VQVDBMetadata& metadata) {
 		}
 	}
 
-	blockDataSize_ = std::accumulate(metadata.latentShape.begin(), metadata.latentShape.end(), 1LL, std::multiplies<int64_t>());
+	blockDataSize_ = std::accumulate(metadata.latentShape.begin(), metadata.latentShape.end(), 1LL, std::multiplies<>());
 	chunkSize_ = sizeof(openvdb::Coord) + blockDataSize_;
 
 	// Write grid-specific metadata
 	// Write name
-	uint32_t nameLength = static_cast<uint32_t>(metadata.name.size());
+	const uint32_t nameLength = static_cast<uint32_t>(metadata.name.size());
 	fileStream_.write(reinterpret_cast<const char*>(&nameLength), sizeof(nameLength));
 	fileStream_.write(metadata.name.data(), nameLength);
 
@@ -112,11 +112,11 @@ void VDBStreamWriter::startGrid(const VQVDBMetadata& metadata) {
 	fileStream_.write(reinterpret_cast<const char*>(&extension), sizeof(extension));
 
 	// Write latent shape (vector of uint16_t)
-	std::vector<uint16_t> shape_u16(metadata.latentShape.begin(), metadata.latentShape.end());
+	const std::vector<uint16_t> shape_u16(metadata.latentShape.begin(), metadata.latentShape.end());
 	fileStream_.write(reinterpret_cast<const char*>(shape_u16.data()), shape_u16.size() * sizeof(uint16_t));
 
 	// Write total blocks
-	uint32_t totalBlockCount = static_cast<uint32_t>(metadata.totalBlocks);
+	const uint32_t totalBlockCount = static_cast<uint32_t>(metadata.totalBlocks);
 	fileStream_.write(reinterpret_cast<const char*>(&totalBlockCount), sizeof(totalBlockCount));
 
 	if (!fileStream_) {
@@ -177,6 +177,7 @@ VDBStreamReader::VDBStreamReader(std::string_view inPath) : buffer_(IO_BUFFER_SI
 	currentGrid_ = 0;
 	bufferOffset_ = 0;
 	bufferBytes_ = 0;
+	remainingDataBytes_ = 0;
 }
 
 VQVDBMetadata VDBStreamReader::nextGridMetadata() {
@@ -217,12 +218,12 @@ VQVDBMetadata VDBStreamReader::nextGridMetadata() {
 	metadata.totalBlocks = totalBlockCount;
 
 	// Prepare for data reading
-	blockDataSize_ = std::accumulate(metadata.latentShape.begin(), metadata.latentShape.end(), 1LL, std::multiplies<int64_t>());
+	blockDataSize_ = std::accumulate(metadata.latentShape.begin(), metadata.latentShape.end(), 1LL, std::multiplies<>());
 	chunkSize_ = sizeof(openvdb::Coord) + blockDataSize_;
 	blocksRead_ = 0;
 	currentMetadata_ = metadata;
+	remainingDataBytes_ = metadata.totalBlocks * chunkSize_;
 
-	// Now that headers are read, fill the buffer for data chunks
 	refillBuffer();
 
 	currentGrid_++;
@@ -242,7 +243,7 @@ EncodedBatch VDBStreamReader::nextBatch(const size_t maxBatch) {
 
 	std::vector<openvdb::Coord> originsBatch;
 	originsBatch.reserve(blocksToRequest);
-	uint8_t* dataPtr = data.data_ptr<uint8_t>();
+	auto* dataPtr = data.data_ptr<uint8_t>();
 
 	size_t blocksProcessed = 0;
 	while (blocksProcessed < blocksToRequest) {
@@ -251,7 +252,6 @@ EncodedBatch VDBStreamReader::nextBatch(const size_t maxBatch) {
 
 		if (blocksAvailableInBuffer == 0) {
 			if (fileStream_.eof() || (bufferBytes_ < buffer_.size() && remainingBytesInBuffer < chunkSize_)) {
-				// Break if we are at the end of the file or have a partial chunk remaining
 				break;
 			}
 			refillBuffer();
@@ -273,13 +273,15 @@ EncodedBatch VDBStreamReader::nextBatch(const size_t maxBatch) {
 		blocksProcessed += blocksToProcessNow;
 	}
 
-	if (blocksProcessed < blocksToRequest) {
-		// This can happen legitimately if the file ends exactly at a block boundary.
-		// However, if totalBlocks in metadata suggested more data, it's a truncation error.
-		// The check is implicitly done by hasNext() in the next iteration. For now, we resize the output tensor.
-		data.resize_({static_cast<int64_t>(blocksProcessed)});
-	}
+	remainingDataBytes_ -= blocksProcessed * chunkSize_;
 
+	if (blocksProcessed < blocksToRequest) {
+		if (remainingDataBytes_ > 0) {
+			throw std::runtime_error("File truncated: Fewer blocks read than expected by metadata.");
+		}
+		tensorShape[0] = static_cast<int64_t>(blocksProcessed);  // Update first dim
+		data = data.resize_(tensorShape);                        // Resize to new shape vector
+	}
 
 	blocksRead_ += blocksProcessed;
 	return {data, originsBatch};
@@ -292,12 +294,30 @@ void VDBStreamReader::refillBuffer() {
 		std::memmove(buffer_.data(), buffer_.data() + bufferOffset_, remainingBytes);
 	}
 
-	const size_t bytesToRead = buffer_.size() - remainingBytes;
+	const size_t maxPossibleRead = buffer_.size() - remainingBytes;
+	const size_t bytesToRead = std::min(maxPossibleRead, remainingDataBytes_);
+
+	if (bytesToRead == 0) {
+		bufferBytes_ = remainingBytes;
+		bufferOffset_ = 0;
+		return;  // Nothing left to read for this grid
+	}
+
 	fileStream_.read(buffer_.data() + remainingBytes, bytesToRead);
+
+	const size_t bytesRead = fileStream_.gcount();
+
+	remainingDataBytes_ -= bytesRead;
 
 	if (fileStream_.fail() && !fileStream_.eof()) {
 		throw std::runtime_error("Failed to read from file.");
 	}
-	bufferBytes_ = remainingBytes + fileStream_.gcount();
+
+	// NEW: Check for truncation (read less than requested, but not at EOF and still expecting more)
+	if (bytesRead < bytesToRead && !fileStream_.eof() && remainingDataBytes_ > 0) {
+		throw std::runtime_error("File truncated: Incomplete read during refill.");
+	}
+
+	bufferBytes_ = remainingBytes + bytesRead;
 	bufferOffset_ = 0;
 }

@@ -95,6 +95,6 @@ void SOP_VQVDB_DecoderVerb::cook(const CookParms& cookparms) const {
 	}
 
 	for (const auto& grid : output_grid) {
-		GU_PrimVDB::buildFromGrid(*gdp, grid, nullptr, sopparms.getVdbname());
+		GU_PrimVDB::buildFromGrid(*gdp, grid, nullptr, grid->getName().c_str());
 	}
 }

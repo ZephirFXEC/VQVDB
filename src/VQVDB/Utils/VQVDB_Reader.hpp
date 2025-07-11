@@ -107,8 +107,9 @@ class VDBStreamReader {
 	size_t blocksRead_ = 0;
 	size_t blockDataSize_ = 0;
 	size_t chunkSize_ = 0;
+	size_t remainingDataBytes_ = 0;
 
-	static constexpr size_t IO_BUFFER_SIZE = 4 * 1024 * 1024;
+	static constexpr size_t IO_BUFFER_SIZE = 64 * 1024 * 1024;
 	std::vector<char> buffer_;
 	size_t bufferOffset_ = 0;
 	size_t bufferBytes_ = 0;

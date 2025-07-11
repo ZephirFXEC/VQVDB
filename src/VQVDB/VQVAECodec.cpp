@@ -139,7 +139,7 @@ void VQVAECodec::decompress(const std::string& inPath, std::vector<openvdb::Floa
 		std::cout << "Decompressing grid '" << metadata.name << "' with " << totalBlocks << " blocks...\n";
 
 		auto grid = openvdb::FloatGrid::create();
-		auto transform = openvdb::math::Transform::createLinearTransform(metadata.transform);
+		const auto transform = openvdb::math::Transform::createLinearTransform(metadata.transform);
 		grid->setTransform(transform);
 		grid->setName(metadata.name);
 
