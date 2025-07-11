@@ -3,6 +3,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from VQVAE_v2 import EncoderFloat, DecoderFloat, ResidualBlock, ChannelAttention
+
 class InferenceEncoder(nn.Module):
     """A lean encoder for inference. Structurally identical to the training Encoder."""
     def __init__(self, in_channels: int, embedding_dim: int):
@@ -63,9 +65,9 @@ class InferenceVQVAE(nn.Module):
     def __init__(self, in_channels: int, embedding_dim: int, num_embeddings: int):
         super().__init__()
         self.embedding_dim = embedding_dim
-        self.encoder = InferenceEncoder(in_channels, embedding_dim)
+        self.encoder = EncoderFloat(in_channels, embedding_dim)
         self.quantizer = InferenceVectorQuantizer(num_embeddings, embedding_dim)
-        self.decoder = InferenceDecoder(embedding_dim, in_channels)
+        self.decoder = DecoderFloat(embedding_dim, in_channels)
 
     @torch.jit.export
     def encode(self, x: torch.Tensor) -> torch.Tensor:
@@ -108,7 +110,7 @@ torch.backends.cudnn.benchmark = True
 def main():
 
     # Load the state dict from your trained model.
-    trained_state_dict = torch.load('models\good_vqvae.pth', map_location='cpu')
+    trained_state_dict = torch.load('models/scalar/vqvae_128_256_singlechannel_residual.pth', map_location='cpu')
 
     # Instantiate the NEW, inference-only model.
     print("Instantiating the lean InferenceVQVAE model...")

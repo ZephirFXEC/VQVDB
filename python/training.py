@@ -4,15 +4,13 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 
 def train(args):
     # Hyperparameters
-    BATCH_SIZE = 1024
-    EPOCHS = 75
+    BATCH_SIZE = 2048
+    EPOCHS = 30
     LR = 1e-4
-    IN_CHANNELS = 3
-    EMBEDDING_DIM = 256  # The dimensionality of the embeddings
-    NUM_EMBEDDINGS = 4096  # The size of the codebook (the "dictionary")
-    COMMITMENT_COST = 0.5
-    EPOCH_WARMUP = 20  # Steps before dead code reset
-    RESET_DEAD_CODES_EVERY_N_EPOCH = 8 # Frequency of dead
+    IN_CHANNELS = 1
+    EMBEDDING_DIM = 128  # The dimensionality of the embeddings
+    NUM_EMBEDDINGS = 256  # The size of the codebook (the "dictionary")
+    COMMITMENT_COST = 0.25
 
     device = torch.device("cuda")
     print(f"Using device: {device}")
@@ -24,7 +22,7 @@ def train(args):
     print(f"Found {len(npy_files)} .npy files")
 
     vdb_dataset = VDBLeafDataset(npy_files=npy_files, include_origins=False, in_channels=IN_CHANNELS)
-    #vdb_dataset = torch.utils.data.Subset(vdb_dataset, range(0, len(vdb_dataset), 2))  # Subsample to reduce dataset size
+    vdb_dataset = torch.utils.data.Subset(vdb_dataset, range(0, len(vdb_dataset), 4))  # Subsample to reduce dataset size
     print(f"Dataset created with {len(vdb_dataset)} total blocks.")
 
     # Split dataset randomly with 90% for training and 10% for validation
@@ -54,6 +52,7 @@ def train(args):
         shuffle=False)
 
     model = VQVAE(IN_CHANNELS, EMBEDDING_DIM, NUM_EMBEDDINGS, COMMITMENT_COST).to(device)
+        
     optimizer = Adam(model.parameters(), lr=LR)
     scheduler = CosineAnnealingLR(optimizer, T_max=EPOCHS * len(train_loader))
 
@@ -100,7 +99,7 @@ def train(args):
             
         scheduler.step()
             
-        if (epoch+1) == 25:
+        if epoch == 5 or epoch == 10 or epoch == 15 or epoch == 20:
             model.check_and_reset_dead_codes(z)
 
 
@@ -125,6 +124,7 @@ def train(args):
             state = {'epoch': epoch + 1, 'state_dict': model.state_dict(),
                      'optimizer': optimizer.state_dict(), 'scheduler': scheduler.state_dict(), "recon_loss_l": recon_loss_l,
                      "vq_loss_l": vq_loss_l, "perplexity_l": perplexity_l}
+            print(f"New best validation loss: {avg_val_loss:.6f}, saving model...")
             os.makedirs(os.path.dirname(args.model_path), exist_ok=True)
             torch.save(state, args.model_path)
 

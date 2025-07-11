@@ -13,7 +13,7 @@ from torch.optim import Adam
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 import matplotlib.pyplot as plt
-
+import einops 
 LEAF_DIM = 8
 
 
@@ -67,7 +67,7 @@ class VDBLeafDataset(Dataset):
         file_idx = np.searchsorted(self.file_offsets, idx, side="right") - 1
         local_idx = idx - self.file_offsets[file_idx]
 
-        leaf_np = self.arrays[file_idx][local_idx].astype(np.float32, copy=False)
+        leaf_np = self.arrays[file_idx][local_idx].astype(np.float32, copy=True)
         leaf = torch.from_numpy(leaf_np)
 
         if self.in_channels == 1:
@@ -101,7 +101,7 @@ class VectorQuantizerEMA(nn.Module):
         embed = F.normalize(embed, dim=1)
 
         self.register_buffer('embedding', embed)
-        self.register_buffer('cluster_size', torch.zeros(num_embeddings))
+        self.register_buffer('cluster_size', torch.ones(num_embeddings))
         self.register_buffer('embed_avg', embed.clone().detach())
 
     def forward(self, x) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -156,165 +156,183 @@ class VectorQuantizerEMA(nn.Module):
         return quantized, loss, perplexity
 
 
-class ResidualBlock(nn.Module):
-    """Generic 3D residual block for reuse."""
-    def __init__(self, channels, norm_layer):
+def icnr_(tensor, upscale_factor=2, initializer=nn.init.kaiming_normal_):
+    """ICNR initialisation for 3-D conv/transpose-conv weights."""
+    out_channels, in_channels, k, k2, k3 = tensor.shape
+    sub = out_channels // (upscale_factor ** 3)
+    if sub == 0:
+        raise ValueError("ICNR: out_channels too small.")
+    temp = torch.zeros([sub, in_channels, k, k2, k3])
+    initializer(temp)
+    temp = temp.repeat_interleave(upscale_factor ** 3, 0)
+    with torch.no_grad():
+        tensor.copy_(temp)
+
+class PixelShuffle3D(nn.Module):
+    def __init__(self, upscale_factor: int = 2):
         super().__init__()
-        self.conv1 = nn.Conv3d(channels, channels, kernel_size=3, stride=1, padding=1)
-        self.norm1 = norm_layer(channels)
+        self.r = upscale_factor
+
+    def forward(self, x):
+        b, c, d, h, w = x.size()
+        r = self.r
+        oc = c // (r * r * r)
+        
+        if c % (r * r * r) != 0:
+            raise RuntimeError("Channels not divisible by r^3.")
+        
+        x = x.view(b, oc, r, r, r, d, h, w)
+        x = x.permute(0, 1, 5, 2, 6, 3, 7, 4)
+        return x.contiguous().view(b, oc, d * r, h * r, w * r)
+        
+class ResidualBlock(nn.Module):
+    """Pre-activation, GN-only residual block with residual scaling."""
+    def __init__(self, channels, groups=8, scale=0.1):
+        super().__init__()
+        self.scale = scale
+        self.gn1 = nn.GroupNorm(groups, channels)
+        self.conv1 = nn.Conv3d(channels, channels, 3, 1, 1, bias=True)
+        self.gn2 = nn.GroupNorm(groups, channels)
         self.relu = nn.ReLU(inplace=True)
-        self.conv2 = nn.Conv3d(channels, channels, kernel_size=3, stride=1, padding=1)
-        self.norm2 = norm_layer(channels)
+        self.conv2 = nn.Conv3d(channels, channels, 3, 1, 1, bias=True)
+        nn.init.normal_(self.conv2.weight, mean=0, std=1e-3)
+        nn.init.zeros_(self.conv2.bias)
 
     def forward(self, x):
         residual = x
+        x = self.relu(self.gn1(x))
         x = self.conv1(x)
-        x = self.norm1(x)
-        x = self.relu(x)
+        x = self.relu(self.gn2(x))
         x = self.conv2(x)
-        x = self.norm2(x)
-        return x + residual  # Shortcut connection
+        return residual + self.scale * x
+    
+    
+class ChannelAttention(nn.Module):
+    def __init__(self, channels, reduction=4):
+        super().__init__()
+        self.avg_pool = nn.AdaptiveAvgPool3d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(channels, channels // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(channels // reduction, channels, bias=False),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        b, c, _, _, _ = x.size()
+        y = self.avg_pool(x).view(b, c)
+        y = self.fc(y).view(b, c, 1, 1, 1)
+        return x * y.expand_as(x)
 
 class EncoderFloat(nn.Module):
-    def __init__(self, in_channels, embedding_dim):
+    def __init__(self, in_channels: int, embedding_dim: int):
         super().__init__()
-        # Downsample: 8^3 -> 4^3
-        self.downsample = nn.Sequential(
-            nn.Conv3d(in_channels, 32, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm3d(32),
-            nn.ReLU(inplace=True)
+        self.pre = nn.Sequential(
+            nn.Conv3d(in_channels, 16, 3, 1, 1, bias=True),
+            nn.GroupNorm(4, 16),
+            nn.ReLU(inplace=True),
+            ResidualBlock(16),
         )
-        # Refine with residual block
-        self.residual1 = ResidualBlock(32, nn.BatchNorm3d)
-        self.residual2 = ResidualBlock(32, nn.BatchNorm3d)  # Second for depth
-        # Self-attention (adapted for 3D)
-        self.attention = nn.MultiheadAttention(embed_dim=32, num_heads=4)
-        # Final projection to embedding_dim
-        self.final = nn.Conv3d(32, embedding_dim, kernel_size=3, stride=1, padding=1)
+        self.down = nn.Conv3d(16, 32, 4, 2, 1, bias=True)
+        self.res_stack = nn.Sequential(ResidualBlock(32))
+        self.attn = ChannelAttention(32)
+        self.proj = nn.Conv3d(32, embedding_dim, 1)
 
     def forward(self, x):
-        x = self.downsample(x)  # Shape: (B, 32, 4, 4, 4)
-        x = self.residual1(x)
-        x = self.residual2(x)
-        # Attention: Flatten spatial to sequence and permute to (seq_len, B, embed_dim)
-        B, C, D, H, W = x.shape
-        seq_len = D * H * W  # 64 for 4x4x4
-        x_flat = x.view(B, C, seq_len).permute(2, 0, 1)  # (seq_len, B, C=32) - FIXED!
-        x_att, _ = self.attention(x_flat, x_flat, x_flat)  # Self-attention; returns (seq_len, B, C)
-        x = x_att.permute(1, 2, 0).view(B, C, D, H, W)  # Reshape back - FIXED!
-        return self.final(x)  # Shape: (B, embedding_dim, 4, 4, 4)
+        x = self.pre(x)
+        x = self.down(x)
+        x = self.res_stack(x)
+        x = self.attn(x)
+        return self.proj(x)
 
 class DecoderFloat(nn.Module):
-    def __init__(self, embedding_dim, out_channels):
+    def __init__(self, embedding_dim: int, out_channels: int):
         super().__init__()
-        # Initial expansion
-        self.initial = nn.Conv3d(embedding_dim, 64, kernel_size=3, stride=1, padding=1)
-        self.norm_initial = nn.BatchNorm3d(64)
-        self.relu = nn.ReLU(inplace=True)
-        # Refine with residual block
-        self.residual1 = ResidualBlock(64, nn.BatchNorm3d)
-        self.residual2 = ResidualBlock(64, nn.BatchNorm3d)  # Second for depth
-        # Self-attention (adapted for 3D)
-        self.attention = nn.MultiheadAttention(embed_dim=64, num_heads=4)
-        # Upsample: 4^3 -> 8^3
-        self.upsample = nn.ConvTranspose3d(64, 32, kernel_size=4, stride=2, padding=1)
-        self.norm_upsample = nn.BatchNorm3d(32)
-        # Final reconstruction
-        self.final = nn.Conv3d(32, out_channels, kernel_size=3, stride=1, padding=1)
-        self.activation = nn.Sigmoid()  # For (0,1) range
-
-    def forward(self, x):  # Input: (B, embedding_dim, 4, 4, 4)
-        x = self.initial(x)
-        x = self.norm_initial(x)
-        x = self.relu(x)
-        x = self.residual1(x)
-        x = self.residual2(x)
-        # Attention: Flatten spatial to sequence and permute to (seq_len, B, embed_dim)
-        B, C, D, H, W = x.shape
-        seq_len = D * H * W  # 64 for 4x4x4
-        x_flat = x.view(B, C, seq_len).permute(2, 0, 1)  # (seq_len, B, C=64) - FIXED!
-        x_att, _ = self.attention(x_flat, x_flat, x_flat)  # Self-attention; returns (seq_len, B, C)
-        x = x_att.permute(1, 2, 0).view(B, C, D, H, W)  # Reshape back - FIXED!
-        x = self.upsample(x)  # Shape: (B, 32, 8, 8, 8)
-        x = self.norm_upsample(x)
-        x = self.relu(x)
-        x = self.final(x)
-        return self.activation(x)  # Shape: (B, out_channels, 8, 8, 8)
-
-# Vec3 versions (for completeness, with same fixes - ignore if focusing on floats)
-class EncoderVec3(nn.Module):
-    def __init__(self, in_channels, embedding_dim):
-        super().__init__()
-        # Downsample: 8^3 -> 4^3
-        self.downsample = nn.Sequential(
-            nn.Conv3d(in_channels, 64, kernel_size=4, stride=2, padding=1),
+        self.stem = nn.Sequential(
+            nn.Conv3d(embedding_dim, 64, 3, 1, 1, bias=True),
             nn.GroupNorm(8, 64),
-            nn.ReLU(inplace=True)
+            nn.ReLU(inplace=True),
         )
-        # Refine with residual block
-        self.residual1 = ResidualBlock(64, lambda c: nn.GroupNorm(8, c))
-        self.residual2 = ResidualBlock(64, lambda c: nn.GroupNorm(8, c))  # Second for depth
-        # Self-attention (adapted for 3D)
-        self.attention = nn.MultiheadAttention(embed_dim=64, num_heads=4)
-        # Final projection to embedding_dim
-        self.final = nn.Conv3d(64, embedding_dim, kernel_size=3, stride=1, padding=1)
+        self.res_stack = nn.Sequential(ResidualBlock(64))
+        self.attn = ChannelAttention(64)
+
+        # upsample 4³ → 8³
+        self.up_conv = nn.Conv3d(64, 32 * 8, 3, 1, 1, bias=True)
+        icnr_(self.up_conv.weight)
+        self.pixshuf = PixelShuffle3D(2)
+        self.final = nn.Conv3d(32, out_channels, 3, 1, 1, bias=True)
 
     def forward(self, x):
-        x = self.downsample(x)  # Shape: (B, 64, 4, 4, 4)
-        x = self.residual1(x)
-        x = self.residual2(x)
-        # Attention: Flatten and permute correctly
-        B, C, D, H, W = x.shape
-        seq_len = D * H * W
-        x_flat = x.view(B, C, seq_len).permute(2, 0, 1)  # (seq_len, B, 64)
-        x_att, _ = self.attention(x_flat, x_flat, x_flat)
-        x = x_att.permute(1, 2, 0).view(B, C, D, H, W)
-        return self.final(x)
+        x = self.stem(x)
+        x = self.res_stack(x)
+        x = self.attn(x)
+        x = self.pixshuf(self.up_conv(x))
+        return torch.sigmoid(self.final(x))
+
+class EncoderVec3(nn.Module):
+    def __init__(self, in_channels: int, embedding_dim: int = 64):
+        super().__init__()
+        self.pre = nn.Sequential(
+            nn.Conv3d(in_channels, 64, 3, 1, 1, bias=True),
+            nn.GroupNorm(8, 64),
+            nn.ReLU(inplace=True),
+            ResidualBlock(64),
+        )
+        self.down1 = nn.Conv3d(64, 128, 3, 2, 1, bias=True)
+        self.res_stack = nn.Sequential(
+            ResidualBlock(128), ResidualBlock(128)
+        )
+        self.attn = ChannelAttention(128)
+        self.proj = nn.Conv3d(128, embedding_dim, 1)
+
+    def forward(self, x):
+        x = self.pre(x)
+        x = self.down1(x)
+        x = self.res_stack(x)
+        x = self.attn(x)
+        return self.proj(x)
 
 class DecoderVec3(nn.Module):
     def __init__(self, embedding_dim, out_channels):
         super().__init__()
-        # Initial expansion
-        self.initial = nn.Conv3d(embedding_dim, 128, kernel_size=3, stride=1, padding=1)
-        self.norm_initial = nn.GroupNorm(8, 128)
-        self.relu = nn.ReLU(inplace=True)
-        # Refine with residual block
-        self.residual1 = ResidualBlock(128, lambda c: nn.GroupNorm(8, c))
-        self.residual2 = ResidualBlock(128, lambda c: nn.GroupNorm(8, c))  # Second for depth
-        # Self-attention (adapted for 3D)
-        self.attention = nn.MultiheadAttention(embed_dim=128, num_heads=4)
-        # Upsample: 4^3 -> 8^3
-        self.upsample = nn.ConvTranspose3d(128, 64, kernel_size=4, stride=2, padding=1)
-        self.norm_upsample = nn.GroupNorm(8, 64)
-        # Final reconstruction
-        self.final = nn.Conv3d(64, out_channels, kernel_size=3, stride=1, padding=1)
-        self.activation = nn.Tanh()  # For (-1,1) range
+        self.stem = nn.Sequential(
+            nn.Conv3d(embedding_dim, 128, 3, 1, 1, bias=True),
+            nn.GroupNorm(8, 128),
+            nn.ReLU(inplace=True)
+        )
+        self.res_stack = nn.Sequential(
+            ResidualBlock(128), ResidualBlock(128)
+        )
+        self.attn = ChannelAttention(128)
 
-    def forward(self, x):  # Input: (B, embedding_dim, 4, 4, 4)
-        x = self.initial(x)
-        x = self.norm_initial(x)
-        x = self.relu(x)
-        x = self.residual1(x)
-        x = self.residual2(x)
-        # Attention: Flatten and permute correctly
-        B, C, D, H, W = x.shape
-        seq_len = D * H * W
-        x_flat = x.view(B, C, seq_len).permute(2, 0, 1)  # (seq_len, B, 128)
-        x_att, _ = self.attention(x_flat, x_flat, x_flat)
-        x = x_att.permute(1, 2, 0).view(B, C, D, H, W)
-        x = self.upsample(x)  # Shape: (B, 64, 8, 8, 8)
-        x = self.norm_upsample(x)
-        x = self.relu(x)
-        x = self.final(x)
-        return self.activation(x)
+        self.up_conv = nn.Conv3d(128, 32 * 8, 3, 1, 1, bias=True)
+        icnr_(self.up_conv.weight)
+        self.pixshuf = PixelShuffle3D(2)
+        self.final = nn.Conv3d(32, out_channels, 3, 1, 1, bias=True)
+
+    def forward(self, x):
+        x = self.stem(x)
+        x = self.res_stack(x)
+        x = self.attn(x)
+        x = self.pixshuf(self.up_conv(x))
+        return torch.tanh(self.final(x))
 
 
 class VQVAE(nn.Module):
     def __init__(self, in_channels, embedding_dim, num_embeddings, commitment_cost):
         super(VQVAE, self).__init__()
-        self.encoder = in_channels == 1 and EncoderFloat(in_channels, embedding_dim) or EncoderVec3(in_channels, embedding_dim)
-        self.quantizer = VectorQuantizerEMA(num_embeddings, embedding_dim, commitment_cost)
-        self.decoder = in_channels == 1 and DecoderFloat(embedding_dim, in_channels) or DecoderVec3(embedding_dim, in_channels)
+        if in_channels == 1:             # float
+            self.encoder = EncoderFloat(in_channels, embedding_dim)
+            self.decoder = DecoderFloat(embedding_dim, in_channels)
+        else:                            # vec3f
+            self.encoder = EncoderVec3(in_channels, embedding_dim)
+            self.decoder = DecoderVec3(embedding_dim, in_channels)
+
+        self.quantizer = VectorQuantizerEMA(
+            num_embeddings=num_embeddings,
+            embedding_dim=embedding_dim,
+            commitment_cost=commitment_cost,
+        )
 
     def forward(self, x):
         z = self.encoder(x)
