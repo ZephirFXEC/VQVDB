@@ -333,10 +333,20 @@ class VQVAE(nn.Module):
             embedding_dim=embedding_dim,
             commitment_cost=commitment_cost,
         )
+        
+        self.in_channels = in_channels
+        self.embedding_dim = embedding_dim
 
+        self.skip_conv = nn.Conv3d(in_channels, embedding_dim, 1, bias=True)
+        
     def forward(self, x):
         z = self.encoder(x)
         quantized, vq_loss, perplexity = self.quantizer(z)
+        # Simple skip: add a downsampled version of x to quantized (helps preserve details)
+        skip = F.avg_pool3d(x, kernel_size=2, stride=2)  # Downsample to 4^3
+        skip = self.skip_conv(skip)  # Project to embedding_dim
+        quantized = quantized + 0.1 * skip  # Light residual skip
+        
         x_recon = self.decoder(quantized)
         return z, x_recon, vq_loss, perplexity
 

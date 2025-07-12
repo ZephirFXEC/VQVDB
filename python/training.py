@@ -1,16 +1,49 @@
 from VQVAE_v2 import *
 
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim import AdamW
+
+def create_3d_sobel_kernels(device):
+    # Sobel kernels for x, y, z directions
+    sobel_x = torch.tensor([[[-1,0,1],[-2,0,2],[-1,0,1]], 
+                           [[-2,0,2],[-4,0,4],[-2,0,2]], 
+                           [[-1,0,1],[-2,0,2],[-1,0,1]]]).float().to(device).unsqueeze(0).unsqueeze(0)
+    
+    sobel_y = torch.tensor([[[-1,-2,-1],[0,0,0],[1,2,1]], 
+                           [[-2,-4,-2],[0,0,0],[2,4,2]], 
+                           [[-1,-2,-1],[0,0,0],[1,2,1]]]).float().to(device).unsqueeze(0).unsqueeze(0)
+    
+    sobel_z = torch.tensor([[[-1,-2,-1],[-2,-4,-2],[-1,-2,-1]], 
+                           [[0,0,0],[0,0,0],[0,0,0]], 
+                           [[1,2,1],[2,4,2],[1,2,1]]]).float().to(device).unsqueeze(0).unsqueeze(0)
+    
+    return sobel_x, sobel_y, sobel_z
+
+
+# Then in loss computation:
+def compute_gradient_loss(recon, target, sobel_x, sobel_y, sobel_z):
+    grad_true_x = F.conv3d(target, sobel_x, padding=1)
+    grad_true_y = F.conv3d(target, sobel_y, padding=1)
+    grad_true_z = F.conv3d(target, sobel_z, padding=1)
+    
+    grad_recon_x = F.conv3d(recon, sobel_x, padding=1)
+    grad_recon_y = F.conv3d(recon, sobel_y, padding=1)
+    grad_recon_z = F.conv3d(recon, sobel_z, padding=1)
+    
+    return (F.mse_loss(grad_recon_x, grad_true_x) + 
+            F.mse_loss(grad_recon_y, grad_true_y) + 
+            F.mse_loss(grad_recon_z, grad_true_z)) / 3
+
 
 def train(args):
     # Hyperparameters
     BATCH_SIZE = 2048
     EPOCHS = 30
-    LR = 1e-4
+    LR = 4e-4
     IN_CHANNELS = 1
     EMBEDDING_DIM = 128  # The dimensionality of the embeddings
     NUM_EMBEDDINGS = 256  # The size of the codebook (the "dictionary")
-    COMMITMENT_COST = 0.25
+    COMMITMENT_COST = 0.5
 
     device = torch.device("cuda")
     print(f"Using device: {device}")
@@ -22,7 +55,7 @@ def train(args):
     print(f"Found {len(npy_files)} .npy files")
 
     vdb_dataset = VDBLeafDataset(npy_files=npy_files, include_origins=False, in_channels=IN_CHANNELS)
-    vdb_dataset = torch.utils.data.Subset(vdb_dataset, range(0, len(vdb_dataset), 4))  # Subsample to reduce dataset size
+    vdb_dataset = torch.utils.data.Subset(vdb_dataset, range(0, len(vdb_dataset), 8))  # Subsample to reduce dataset size
     print(f"Dataset created with {len(vdb_dataset)} total blocks.")
 
     # Split dataset randomly with 90% for training and 10% for validation
@@ -52,105 +85,194 @@ def train(args):
         shuffle=False)
 
     model = VQVAE(IN_CHANNELS, EMBEDDING_DIM, NUM_EMBEDDINGS, COMMITMENT_COST).to(device)
-        
-    optimizer = Adam(model.parameters(), lr=LR)
-    scheduler = CosineAnnealingLR(optimizer, T_max=EPOCHS * len(train_loader))
+    
+    optimizer = AdamW(model.parameters(), lr=LR, weight_decay=1e-4, betas=(0.9, 0.999))
+
+    # Better scheduler with warmup
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer, 
+        max_lr=LR,
+        total_steps=EPOCHS * len(train_loader),
+        pct_start=0.1,
+        anneal_strategy='cos'
+    )
+
+    # Mixed precision training
+    scaler = torch.GradScaler()
+
+    # Gradient clipping
+    MAX_GRAD_NORM = 1.0
 
     print("Starting training with data from DataLoader...")
     best_val_loss = float('inf')
 
+    # Better 3D Sobel kernels
+    sobel_x, sobel_y, sobel_z = create_3d_sobel_kernels(device)
 
-    recon_loss_l = []  # List to store reconstruction losses
-    vq_loss_l = []  # List to store VQ losses
-    perplexity_l = []  # List to store perplexity values
+    # Actually use these lists
+    recon_loss_l = []
+    vq_loss_l = []
+    perplexity_l = []
+
+    # Dead code reset counter
+    dead_code_reset_interval = 5  # Reset every 5 epochs instead of every epoch
 
     for epoch in range(EPOCHS):
         model.train()
         total_recon_loss = 0.0
         total_vq_loss = 0.0
-        last_perplexity = 0.0 # To store the perplexity for logging
+        total_gradient_loss = 0.0
+        last_perplexity = 0.0
+        
+        # Store encoder outputs for dead code reset (outside autocast)
+        encoder_outputs_for_reset = None
 
-        # Use a progress bar for the training loop
         pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{EPOCHS}", leave=False)
-        for batch in pbar:
-            leaves_norm = batch
-            leaves_norm = leaves_norm.to(device, non_blocking=True)
-
+        
+        for batch_idx, batch in enumerate(pbar):
+            leaves_norm = batch.to(device, non_blocking=True)
+            
             optimizer.zero_grad()
-
-            z, recon_norm, vq_loss, perplexity = model(leaves_norm)
-            recon_error = F.mse_loss(recon_norm, leaves_norm)
-            loss = recon_error + vq_loss
-
-            loss.backward()
-            optimizer.step()
-
-            # Update running losses and perplexity
+            
+            # Mixed precision forward pass
+            with torch.amp.autocast("cuda"):
+                z, recon_norm, vq_loss, perplexity = model(leaves_norm)
+                
+                # Enhanced loss computation
+                recon_mse = F.mse_loss(recon_norm, leaves_norm)
+                recon_l1 = F.l1_loss(recon_norm, leaves_norm)
+                
+                # Better 3D gradient loss
+                gradient_loss = compute_gradient_loss(recon_norm, leaves_norm, sobel_x, sobel_y, sobel_z)
+                
+                # Adaptive loss weighting
+                mse_weight = 0.7
+                l1_weight = 0.2
+                grad_weight = min(0.1 * (epoch + 1) / 10, 0.15)
+                
+                recon_error = mse_weight * recon_mse + l1_weight * recon_l1 + grad_weight * gradient_loss
+                loss = recon_error + vq_loss
+            
+            # Store encoder outputs for dead code reset (outside autocast to avoid dtype issues)
+            if batch_idx == 0:  # Store from first batch for dead code reset
+                encoder_outputs_for_reset = z.detach().float()  # Convert to float32
+            
+            # Mixed precision backward pass
+            scaler.scale(loss).backward()
+            
+            # Gradient clipping
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
+            
+            scaler.step(optimizer)
+            scaler.update()
+            scheduler.step()
+            
+            # Update running losses
             total_recon_loss += recon_error.item()
             total_vq_loss += vq_loss.item()
+            total_gradient_loss += gradient_loss.item()
             last_perplexity = perplexity.item()
-
-            # Update progress bar description
+            
+            # Update progress bar
             pbar.set_postfix(
                 recon_loss=recon_error.item(),
                 vq_loss=vq_loss.item(),
-                ppl=last_perplexity
+                grad_loss=gradient_loss.item(),
+                ppl=last_perplexity,
+                lr=scheduler.get_last_lr()[0]
             )
-            
-        scheduler.step()
-            
-        if epoch == 5 or epoch == 10 or epoch == 15 or epoch == 20:
-            model.check_and_reset_dead_codes(z)
-
+        
+        # Dead code reset less frequently and with proper dtype handling
+        if (epoch + 1) % dead_code_reset_interval == 0 and encoder_outputs_for_reset is not None:
+            model.check_and_reset_dead_codes(encoder_outputs_for_reset)
 
         # Validation phase
         model.eval()
-        val_loss = 0.0
+        val_recon_loss = 0.0
+        val_vq_loss = 0.0
+        val_gradient_loss = 0.0
+        
         with torch.no_grad():
             for batch in val_loader:
-                leaves_norm = batch
-                leaves_norm = leaves_norm.to(device)
-                _, recon_norm, vq_loss, _ = model(leaves_norm)
-                recon_error = F.mse_loss(recon_norm, leaves_norm)
-                val_loss += recon_error.item() + vq_loss.item()
+                leaves_norm = batch.to(device)
                 
+                with torch.amp.autocast("cuda"):
+                    _, recon_norm, vq_loss, _ = model(leaves_norm)
+                    
+                    # Same loss computation for validation
+                    recon_mse = F.mse_loss(recon_norm, leaves_norm)
+                    recon_l1 = F.l1_loss(recon_norm, leaves_norm)
+                    gradient_loss = compute_gradient_loss(recon_norm, leaves_norm, sobel_x, sobel_y, sobel_z)
+                    
+                    grad_weight = min(0.1 * (epoch + 1) / 10, 0.15)
+                    recon_error = 0.7 * recon_mse + 0.2 * recon_l1 + grad_weight * gradient_loss
+                    
+                    val_recon_loss += recon_error.item()
+                    val_vq_loss += vq_loss.item()
+                    val_gradient_loss += gradient_loss.item()
+        
+        # Calculate averages
         avg_train_recon = total_recon_loss / len(train_loader)
         avg_train_vq = total_vq_loss / len(train_loader)
-        avg_val_loss = val_loss / len(val_loader)
-
-        # Save best model
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            state = {'epoch': epoch + 1, 'state_dict': model.state_dict(),
-                     'optimizer': optimizer.state_dict(), 'scheduler': scheduler.state_dict(), "recon_loss_l": recon_loss_l,
-                     "vq_loss_l": vq_loss_l, "perplexity_l": perplexity_l}
-            print(f"New best validation loss: {avg_val_loss:.6f}, saving model...")
-            os.makedirs(os.path.dirname(args.model_path), exist_ok=True)
-            torch.save(state, args.model_path)
-
-        print(f"\nEpoch {epoch + 1}/{EPOCHS}, "
-              f"Train Recon Loss: {avg_train_recon:.6f}, "
-              f"Train VQ Loss: {avg_train_vq:.6f}, "
-              f"Val Loss: {avg_val_loss:.6f}, "
-              f"Perplexity: {last_perplexity:.6f}")
-
+        avg_train_grad = total_gradient_loss / len(train_loader)
+        
+        avg_val_recon = val_recon_loss / len(val_loader)
+        avg_val_vq = val_vq_loss / len(val_loader)
+        avg_val_grad = val_gradient_loss / len(val_loader)
+        avg_val_loss = avg_val_recon + avg_val_vq
+        
+        # Store in tracking lists
         recon_loss_l.append(avg_train_recon)
         vq_loss_l.append(avg_train_vq)
         perplexity_l.append(last_perplexity)
+        
+        # Save best model
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            
+            checkpoint = {
+                "epoch": epoch + 1,
+                "state_dict": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "scheduler": scheduler.state_dict(),
+                "scaler": scaler.state_dict(),
+                "recon_loss_l": recon_loss_l,
+                "vq_loss_l": vq_loss_l,
+                "perplexity_l": perplexity_l,
+                "best_val_loss": best_val_loss,
+            }
+            
+            os.makedirs(os.path.dirname(args.model_path), exist_ok=True)
+            torch.save(checkpoint, args.model_path)
+            print(f"New best validation loss: {avg_val_loss:.6f} – model saved.")
+        
+        # Enhanced epoch summary
+        print(
+            f"\nEpoch {epoch+1:02d}/{EPOCHS} | "
+            f"Train Recon: {avg_train_recon:.6f} | "
+            f"Train VQ: {avg_train_vq:.6f} | "
+            f"Train Grad: {avg_train_grad:.6f} | "
+            f"Val Loss: {avg_val_loss:.6f} | "
+            f"Perplexity: {last_perplexity:.2f} | "
+            f"LR: {scheduler.get_last_lr()[0]:.2e}"
+        )
+        
+        # Early stopping (optional)
+        if epoch > 10 and last_perplexity < 5.0:
+            print("Warning: Very low perplexity detected. Consider increasing commitment cost.")
 
-    state = {'epoch': epoch + 1, 'state_dict': model.state_dict(),
-             'optimizer': optimizer.state_dict(), 'scheduler': scheduler.state_dict(), "recon_loss_l": recon_loss_l,
-             "vq_loss_l": vq_loss_l, "perplexity_l": perplexity_l}
-    
-    os.makedirs(os.path.dirname(args.model_path), exist_ok=True)
-    torch.save(state, args.model_path)
+    print("Training completed!")
 
+    # Save final model
+    torch.save(model.state_dict(), args.model_path.replace('.pth', '_final.pth'))
 
-    print("Final Model saved successfully.")
     # Save JIT script for inference
+    model.eval()
     scripted_model = torch.jit.script(model)
     scripted_model.save(args.model_path.replace('.pth', '_scripted.pt'))
-    print(f"Final Scripted model saved to {args.model_path.replace('.pth', '_scripted.pt')}")
+    print(f"Scripted model saved to {args.model_path.replace('.pth', '_scripted.pt')}")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="VQ-VAE Compressor for OpenVDB files.")
