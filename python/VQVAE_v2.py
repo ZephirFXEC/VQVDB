@@ -13,7 +13,7 @@ from torch.optim import Adam
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 import matplotlib.pyplot as plt
-
+import einops 
 LEAF_DIM = 8
 
 
@@ -23,6 +23,7 @@ class VDBLeafDataset(Dataset):
             npy_files: Sequence[str | Path],
             transform: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
             *,
+            in_channels: int = 1,
             include_origins: bool = False,
             origins_root: str | Path | None = None,
             origins_suffix: str = "._origins.npy",
@@ -31,16 +32,22 @@ class VDBLeafDataset(Dataset):
         self.transform = transform
         self.include_origins = include_origins
         self.buffer = torch.empty(0)  # Pre-allocate later
-
+        self.in_channels = in_channels
+        
         # Precompute offsets and mmap files
         self.arrays = []
         self.origin_arrays = [] if include_origins else None
         lengths = []
 
+        expected_shape_suffix = (LEAF_DIM, LEAF_DIM, LEAF_DIM)
+        if self.in_channels > 1:
+            # For multi-channel, expect channels-last format from NumPy
+            expected_shape_suffix = (LEAF_DIM, LEAF_DIM, LEAF_DIM, self.in_channels)
+
         for f in npy_files:
             arr = np.load(f, mmap_mode="r")
-            if arr.shape[1:] != (LEAF_DIM, LEAF_DIM, LEAF_DIM):
-                raise ValueError(f"{f}: invalid shape {arr.shape}")
+            if arr.shape[1:] != expected_shape_suffix:
+                raise ValueError(f"File {f}: invalid shape {arr.shape}. Expected suffix {expected_shape_suffix}")
             self.arrays.append(arr)
             lengths.append(arr.shape[0])
 
@@ -60,26 +67,28 @@ class VDBLeafDataset(Dataset):
         file_idx = np.searchsorted(self.file_offsets, idx, side="right") - 1
         local_idx = idx - self.file_offsets[file_idx]
 
-        # Use buffer to avoid allocation
-        leaf = torch.from_numpy(
-            self.arrays[file_idx][local_idx].astype(np.float32, copy=False)
-        ).unsqueeze(0)  # Add channel dim
+        leaf_np = self.arrays[file_idx][local_idx].astype(np.float32, copy=True)
+        leaf = torch.from_numpy(leaf_np)
+
+        if self.in_channels == 1:
+            leaf = leaf.unsqueeze(0)  # (1, 8, 8, 8)
+        else:
+            leaf = leaf.permute(3, 0, 1, 2)  # (C, 8, 8, 8)
+
 
         if self.transform:
-            leaf = self.transform(leaf)
+            leaf_norm = self.transform(leaf_norm)
 
         if self.include_origins:
-            origin = torch.from_numpy(
-                self.origin_arrays[file_idx][local_idx].astype(np.int32, copy=False)
-            )
-            return leaf, origin
+            origin = torch.from_numpy(self.origin_arrays[file_idx][local_idx].astype(np.int32, copy=False))  # type: ignore[index]
+            return leaf_norm, origin
         return leaf
 
 
 
 class VectorQuantizerEMA(nn.Module):
     def __init__(self, num_embeddings: int, embedding_dim: int,
-                 commitment_cost: float, decay: float = 0.99, eps: float = 1e-5):
+                 commitment_cost: float, decay: float = 0.95, eps: float = 1e-4):
         super().__init__()
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
@@ -147,57 +156,183 @@ class VectorQuantizerEMA(nn.Module):
         return quantized, loss, perplexity
 
 
-class Encoder(nn.Module):
-    def __init__(self, in_channels, embedding_dim):
-        super(Encoder, self).__init__()
-        self.net = nn.Sequential(
-            # 8³ → 4³
-            nn.Conv3d(in_channels, 32, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm3d(32),
-            nn.ReLU(inplace=True),
+def icnr_(tensor, upscale_factor=2, initializer=nn.init.kaiming_normal_):
+    """ICNR initialisation for 3-D conv/transpose-conv weights."""
+    out_channels, in_channels, k, k2, k3 = tensor.shape
+    sub = out_channels // (upscale_factor ** 3)
+    if sub == 0:
+        raise ValueError("ICNR: out_channels too small.")
+    temp = torch.zeros([sub, in_channels, k, k2, k3])
+    initializer(temp)
+    temp = temp.repeat_interleave(upscale_factor ** 3, 0)
+    with torch.no_grad():
+        tensor.copy_(temp)
 
-            # Refine at 4³
-            nn.Conv3d(32, 64, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm3d(64),
-            nn.ReLU(inplace=True),
+class PixelShuffle3D(nn.Module):
+    def __init__(self, upscale_factor: int = 2):
+        super().__init__()
+        self.r = upscale_factor
 
-            # Final projection
-            nn.Conv3d(64, embedding_dim, kernel_size=3, stride=1, padding=1),
+    def forward(self, x):
+        b, c, d, h, w = x.size()
+        r = self.r
+        oc = c // (r * r * r)
+        
+        if c % (r * r * r) != 0:
+            raise RuntimeError("Channels not divisible by r^3.")
+        
+        x = x.view(b, oc, r, r, r, d, h, w)
+        x = x.permute(0, 1, 5, 2, 6, 3, 7, 4)
+        return x.contiguous().view(b, oc, d * r, h * r, w * r)
+        
+class ResidualBlock(nn.Module):
+    """Pre-activation, GN-only residual block with residual scaling."""
+    def __init__(self, channels, groups=8, scale=0.1):
+        super().__init__()
+        self.scale = scale
+        self.gn1 = nn.GroupNorm(groups, channels)
+        self.conv1 = nn.Conv3d(channels, channels, 3, 1, 1, bias=True)
+        self.gn2 = nn.GroupNorm(groups, channels)
+        self.relu = nn.ReLU(inplace=True)
+        self.conv2 = nn.Conv3d(channels, channels, 3, 1, 1, bias=True)
+        nn.init.normal_(self.conv2.weight, mean=0, std=1e-3)
+        nn.init.zeros_(self.conv2.bias)
+
+    def forward(self, x):
+        residual = x
+        x = self.relu(self.gn1(x))
+        x = self.conv1(x)
+        x = self.relu(self.gn2(x))
+        x = self.conv2(x)
+        return residual + self.scale * x
+    
+    
+class ChannelAttention(nn.Module):
+    def __init__(self, channels, reduction=4):
+        super().__init__()
+        self.avg_pool = nn.AdaptiveAvgPool3d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(channels, channels // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(channels // reduction, channels, bias=False),
+            nn.Sigmoid()
         )
 
     def forward(self, x):
-        return self.net(x)
+        b, c, _, _, _ = x.size()
+        y = self.avg_pool(x).view(b, c)
+        y = self.fc(y).view(b, c, 1, 1, 1)
+        return x * y.expand_as(x)
 
+class EncoderFloat(nn.Module):
+    def __init__(self, in_channels: int, embedding_dim: int):
+        super().__init__()
+        self.pre = nn.Sequential(
+            nn.Conv3d(in_channels, 16, 3, 1, 1, bias=True),
+            nn.GroupNorm(4, 16),
+            nn.ReLU(inplace=True),
+            ResidualBlock(16),
+        )
+        self.down = nn.Conv3d(16, 32, 4, 2, 1, bias=True)
+        self.res_stack = nn.Sequential(ResidualBlock(32))
+        self.attn = ChannelAttention(32)
+        self.proj = nn.Conv3d(32, embedding_dim, 1)
 
-class Decoder(nn.Module):
+    def forward(self, x):
+        x = self.pre(x)
+        x = self.down(x)
+        x = self.res_stack(x)
+        x = self.attn(x)
+        return self.proj(x)
+
+class DecoderFloat(nn.Module):
+    def __init__(self, embedding_dim: int, out_channels: int):
+        super().__init__()
+        self.stem = nn.Sequential(
+            nn.Conv3d(embedding_dim, 64, 3, 1, 1, bias=True),
+            nn.GroupNorm(8, 64),
+            nn.ReLU(inplace=True),
+        )
+        self.res_stack = nn.Sequential(ResidualBlock(64))
+        self.attn = ChannelAttention(64)
+
+        # upsample 4³ → 8³
+        self.up_conv = nn.Conv3d(64, 32 * 8, 3, 1, 1, bias=True)
+        icnr_(self.up_conv.weight)
+        self.pixshuf = PixelShuffle3D(2)
+        self.final = nn.Conv3d(32, out_channels, 3, 1, 1, bias=True)
+
+    def forward(self, x):
+        x = self.stem(x)
+        x = self.res_stack(x)
+        x = self.attn(x)
+        x = self.pixshuf(self.up_conv(x))
+        return torch.sigmoid(self.final(x))
+
+class EncoderVec3(nn.Module):
+    def __init__(self, in_channels: int, embedding_dim: int = 64):
+        super().__init__()
+        self.pre = nn.Sequential(
+            nn.Conv3d(in_channels, 64, 3, 1, 1, bias=True),
+            nn.GroupNorm(8, 64),
+            nn.ReLU(inplace=True),
+            ResidualBlock(64),
+        )
+        self.down1 = nn.Conv3d(64, 128, 3, 2, 1, bias=True)
+        self.res_stack = nn.Sequential(
+            ResidualBlock(128), ResidualBlock(128)
+        )
+        self.attn = ChannelAttention(128)
+        self.proj = nn.Conv3d(128, embedding_dim, 1)
+
+    def forward(self, x):
+        x = self.pre(x)
+        x = self.down1(x)
+        x = self.res_stack(x)
+        x = self.attn(x)
+        return self.proj(x)
+
+class DecoderVec3(nn.Module):
     def __init__(self, embedding_dim, out_channels):
-        super(Decoder, self).__init__()
-        self.net = nn.Sequential(
-            # Expand from embedding_dim
-            nn.Conv3d(embedding_dim, 64, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm3d(64),
-            nn.ReLU(inplace=True),
-
-            # 4³ → 8³
-            nn.ConvTranspose3d(64, 32, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm3d(32),
-            nn.ReLU(inplace=True),
-
-            # Final reconstruction
-            nn.Conv3d(32, out_channels, kernel_size=3, stride=1, padding=1),
-            nn.Sigmoid(),
+        super().__init__()
+        self.stem = nn.Sequential(
+            nn.Conv3d(embedding_dim, 128, 3, 1, 1, bias=True),
+            nn.GroupNorm(8, 128),
+            nn.ReLU(inplace=True)
         )
+        self.res_stack = nn.Sequential(
+            ResidualBlock(128), ResidualBlock(128)
+        )
+        self.attn = ChannelAttention(128)
+
+        self.up_conv = nn.Conv3d(128, 32 * 8, 3, 1, 1, bias=True)
+        icnr_(self.up_conv.weight)
+        self.pixshuf = PixelShuffle3D(2)
+        self.final = nn.Conv3d(32, out_channels, 3, 1, 1, bias=True)
 
     def forward(self, x):
-        return self.net(x)
+        x = self.stem(x)
+        x = self.res_stack(x)
+        x = self.attn(x)
+        x = self.pixshuf(self.up_conv(x))
+        return torch.tanh(self.final(x))
 
 
 class VQVAE(nn.Module):
     def __init__(self, in_channels, embedding_dim, num_embeddings, commitment_cost):
         super(VQVAE, self).__init__()
-        self.encoder = Encoder(in_channels, embedding_dim)
-        self.quantizer = VectorQuantizerEMA(num_embeddings, embedding_dim, commitment_cost)
-        self.decoder = Decoder(embedding_dim, in_channels)
+        if in_channels == 1:             # float
+            self.encoder = EncoderFloat(in_channels, embedding_dim)
+            self.decoder = DecoderFloat(embedding_dim, in_channels)
+        else:                            # vec3f
+            self.encoder = EncoderVec3(in_channels, embedding_dim)
+            self.decoder = DecoderVec3(embedding_dim, in_channels)
+
+        self.quantizer = VectorQuantizerEMA(
+            num_embeddings=num_embeddings,
+            embedding_dim=embedding_dim,
+            commitment_cost=commitment_cost,
+        )
 
     def forward(self, x):
         z = self.encoder(x)
@@ -281,286 +416,3 @@ class VQVAE(nn.Module):
         permute_fwd: List[int] = [0] + list(range(2, z.dim())) + [1]
         permuted_x = torch.permute(z, permute_fwd).contiguous()
         return permuted_x.view(-1, D)
-
-
-def train(args):
-    # Hyperparameters
-    BATCH_SIZE = 8192*2
-    EPOCHS = 1000
-    LR = 5e-4
-    IN_CHANNELS = 1
-    EMBEDDING_DIM = 128  # The dimensionality of the embeddings
-    NUM_EMBEDDINGS = 256  # The size of the codebook (the "dictionary")
-    COMMITMENT_COST = 0.25
-    TRAINING_STEPS_WARMUP = 100  # Steps before dead code reset
-    RESET_DEAD_CODES_EVERY_N_STEPS = 50  # Frequency of dead
-    
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
-
-    npy_files = list(Path(args.data_dir).glob("*.npy"))
-    if not npy_files:
-        raise ValueError(f"No .npy files found in /data/npy")
-
-    print(f"Found {len(npy_files)} .npy files")
-
-    vdb_dataset = VDBLeafDataset(npy_files=npy_files, include_origins=False)
-    print(f"Dataset created with {len(vdb_dataset)} total blocks.")
-
-    # keep 10% of the dataset for validation
-    split_idx = int(len(vdb_dataset) * 0.6)
-
-    vdb_dataset_train = torch.utils.data.Subset(vdb_dataset, range(split_idx))
-    vdb_dataset_val = torch.utils.data.Subset(vdb_dataset, range(split_idx//4))
-    print(f"Training dataset size: {len(vdb_dataset_train)}")
-    print(f"Validation dataset size: {len(vdb_dataset_val)}")
-
-    if not os.path.exists(os.path.dirname(args.model_path)):
-        os.makedirs(os.path.dirname(args.model_path))
-
-    train_loader = DataLoader(
-        vdb_dataset_train,
-        batch_size=BATCH_SIZE,
-        shuffle=True,   
-        num_workers=8,
-        pin_memory=True,
-        persistent_workers=True,
-    )
-
-    val_loader = DataLoader(
-        vdb_dataset_val,
-        batch_size=BATCH_SIZE,
-        shuffle=False)
-
-    model = VQVAE(IN_CHANNELS, EMBEDDING_DIM, NUM_EMBEDDINGS, COMMITMENT_COST).to(device)
-    optimizer = Adam(model.parameters(), lr=LR)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
-
-    print("Starting training with data from DataLoader...")
-    best_val_loss = float('inf')
-    global_step = 0  # NEW: Initialize a global step counter
-    
-
-    recon_loss_l = []  # List to store reconstruction losses
-    vq_loss_l = []  # List to store VQ losses
-    perplexity_l = []  # List to store perplexity values
-
-    for epoch in range(EPOCHS):
-        model.train()
-        total_recon_loss = 0.0
-        total_vq_loss = 0.0
-        last_perplexity = 0.0 # To store the perplexity for logging
-
-        # Use a progress bar for the training loop
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{EPOCHS}", leave=False)
-        for leaves in pbar:
-            leaves = leaves.to(device, non_blocking=True)
-
-            optimizer.zero_grad()
-
-            # MODIFIED: Unpack the new return value 'z'
-            z, x_recon, vq_loss, perplexity = model(leaves)
-            
-            recon_error = F.mse_loss(x_recon, leaves)
-            loss = recon_error + vq_loss
-
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-
-            # Update running losses and perplexity
-            total_recon_loss += recon_error.item()
-            total_vq_loss += vq_loss.item()
-            last_perplexity = perplexity.item()
-
-            # Update progress bar description
-            pbar.set_postfix(
-                recon_loss=recon_error.item(),
-                vq_loss=vq_loss.item(),
-                ppl=last_perplexity
-            )
-            
-            # --- NEW: Periodic Dead Code Reset Logic ---
-            if global_step > TRAINING_STEPS_WARMUP and global_step % RESET_DEAD_CODES_EVERY_N_STEPS == 0:
-                # We pass `z` to the function. Use .detach() as this is a manual, non-gradient operation.
-                model.check_and_reset_dead_codes(z)
-            
-        global_step += 1 # NEW: Increment the step counter
-
-        # Validation phase
-        model.eval()
-        val_loss = 0.0
-        with torch.no_grad():
-            for leaves in val_loader:
-                leaves = leaves.to(device)
-                # We don't need 'z' here, so we can ignore it
-                _, x_recon, vq_loss, _ = model(leaves)
-                recon_error = F.mse_loss(x_recon, leaves)
-                val_loss += recon_error.item() + vq_loss.item()
-
-        avg_train_recon_loss = total_recon_loss / len(train_loader)
-        avg_train_vq_loss = total_vq_loss / len(train_loader)
-        avg_val_loss = val_loss / len(val_loader)
-        scheduler.step(avg_val_loss)
-
-        # Save best model
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            state = {'epoch': epoch + 1, 'state_dict': model.state_dict(),
-                    'optimizer': optimizer.state_dict(), 'scheduler': scheduler.state_dict(), "recon_loss_l": recon_loss_l,
-                    "vq_loss_l": vq_loss_l, "perplexity_l": perplexity_l}
-            os.makedirs(os.path.dirname(args.model_path), exist_ok=True)
-            torch.save(state, args.model_path)
-            
-        print(f"\nEpoch {epoch + 1}/{EPOCHS}, "
-            f"Train Recon Loss: {avg_train_recon_loss:.4f}, "
-            f"Train VQ Loss: {avg_train_vq_loss:.4f}, "
-            f"Val Loss: {avg_val_loss:.4f}, "
-            f"Perplexity: {last_perplexity:.2f}")
-
-
-        # NEW: Append losses and perplexity to lists
-        recon_loss_l.append(avg_train_recon_loss)
-        vq_loss_l.append(avg_train_vq_loss)
-        perplexity_l.append(last_perplexity)
-    
-
-    
-    state = {'epoch': epoch + 1, 'state_dict': model.state_dict(),
-            'optimizer': optimizer.state_dict(), 'scheduler': scheduler.state_dict(), "recon_loss_l": recon_loss_l,
-            "vq_loss_l": vq_loss_l, "perplexity_l": perplexity_l}
-    os.makedirs(os.path.dirname(args.model_path), exist_ok=True)
-    torch.save(state, args.model_path)
-
-
-    print("Final Model saved successfully.")
-    # Save JIT script for inference
-    scripted_model = torch.jit.script(model)
-    scripted_model.save(args.model_path.replace('.pth', '_scripted.pt'))
-    print(f"Final Scripted model saved to {args.model_path.replace('.pth', '_scripted.pt')}")
-
-
-# --- 5. Compression Function ---
-def compress_vdb(args):
-    # --- Validate inputs ---
-    for path_attr in ("model_path", "input_vdb", "origins_path"):
-        path = getattr(args, path_attr)
-        if not os.path.exists(path):
-            print(f"Error: '{path_attr}' not found at {path}")
-            return
-
-    # --- Load trained VQ-VAE model ---
-    model = VQVAE(
-        embedding_dim=args.embedding_dim,
-        num_embeddings=args.num_embeddings,
-        in_channels=1,
-        commitment_cost=0.25
-    )
-    state = torch.load(args.model_path, map_location=args.device)
-    model.load_state_dict(state)
-    model.to(args.device)
-    model.eval()
-
-    # --- Memory-map input arrays ---
-    leaves_mmap = np.load(args.input_vdb, mmap_mode='r')  # shape: (N, H, W, D)
-    origins_mmap = np.load(args.origins_path, mmap_mode='r')  # shape: (N, ...)
-    num_leaves = leaves_mmap.shape[0]
-    num_origins = origins_mmap.shape[0]
-
-    # --- Determine index-grid shape via a single forward pass ---
-    sample_leaf = leaves_mmap[0:1].astype(np.float32)
-    sample_t = torch.from_numpy(sample_leaf).unsqueeze(1).to(args.device)
-    with torch.no_grad():
-        sample_idx = model.encode(sample_t)
-    idx_shape = tuple(sample_idx.shape[1:])  # e.g., (4, 4, 4)
-
-    # --- Prepare chunking parameters ---
-    CHUNK = 8192  # Tune to your available memory
-
-    # --- Start writing compressed file ---
-    start_time = time.time()
-    with open(args.output_cvdb, 'wb') as f:
-        # Header
-        f.write(b'VQVDB')  # Magic
-        f.write(struct.pack('<B', 2))  # Version w/ origins
-        f.write(struct.pack('<I', args.num_embeddings))  # Codebook size
-        f.write(struct.pack('<B', len(idx_shape)))  # # dims in index grid
-        for dim in idx_shape:
-            f.write(struct.pack('<H', dim))  # Each dim size
-
-        # Origins block
-        f.write(struct.pack('<I', num_origins))  # Count of origins
-        # Write origins in chunks to avoid full-array load
-        for i in range(0, num_origins, CHUNK):
-            end = min(i + CHUNK, num_origins)
-            block = origins_mmap[i:end].astype(np.int32, copy=False)
-            f.write(block.tobytes())
-
-        # Write indices as uint8
-        f.write(struct.pack('<I', num_leaves))
-        with torch.no_grad():
-            for i in tqdm(range(0, num_leaves, CHUNK)):
-                end = min(i + CHUNK, num_leaves)
-                # Direct memory mapping without copy
-                batch = np.copy(leaves_mmap[i:end])  # Required copy for torch conversion
-                tensor = torch.from_numpy(batch).unsqueeze(1).to(args.device)
-
-                indices = model.encode(tensor)
-                indices_np = indices.cpu().numpy().astype(np.uint8)  # UINT8 here
-
-                f.write(indices_np.tobytes())
-
-                # Cleanup GPU/CPU memory
-                del tensor, indices, indices_np
-                if args.device.startswith('cuda'):
-                    torch.cuda.empty_cache()
-
-    elapsed = time.time() - start_time
-    # --- Final Report ---
-    original_size = os.path.getsize(args.input_vdb) + os.path.getsize(args.origins_path)
-    compressed_size = os.path.getsize(args.output_cvdb)
-    ratio = original_size / compressed_size if compressed_size > 0 else 0
-    print(f"\n--- Compression Complete in {elapsed} ---")
-    print(f"Original data size: {original_size / (1024 * 1024):.2f} MB")
-    print(f"Compressed file size: {compressed_size / (1024 * 1024):.2f} MB")
-    print(f"Compression Ratio: {ratio:.2f}x")
-    print(f"Saved to {args.output_cvdb}")
-
-
-# --- 6. Main Argument Parser ---
-
-if __name__ == "__main__":   
-    parser = argparse.ArgumentParser(description="VQ-VAE Compressor for OpenVDB files.")
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    # --- Training Arguments ---
-    parser_train = subparsers.add_parser("train", help="Train the VQ-VAE model.")
-    parser_train.add_argument("--data_dir", type=str, default="data", help="Directory with .vdb files.")
-    parser_train.add_argument("--grid_name", type=str, default="density", help="Name of the grid to extract.")
-    parser_train.add_argument("--epochs", type=int, default=50, help="Number of training epochs.")
-    parser_train.add_argument("--batch_size", type=int, default=4096, help="Training batch size.")
-    parser_train.add_argument("--lr", type=float, default=1e-3, help="Learning rate.")
-    parser_train.add_argument("--num_embeddings", type=int, default=256, help="Size of the codebook.")
-    parser_train.add_argument("--embedding_dim", type=int, default=128, help="Dimension of the latent vectors.")
-    parser_train.add_argument("--model_path", type=str, default="models/vqvae.pth",
-                              help="Path to save the trained model.")
-    parser_train.set_defaults(func=train)
-
-    # --- Compression Arguments ---
-    parser_compress = subparsers.add_parser("compress", help="Compress a VDB file.")
-    parser_compress.add_argument("input_vdb", type=str, help="Path to the input .vdb file.")
-    parser_compress.add_argument("origins_path", type=str, help="Path to the origins file.")
-    parser_compress.add_argument("output_cvdb", type=str, help="Path for the compressed .cvdb file.")
-    parser_compress.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu",
-                                 help="Device to run the model on (e.g., 'cuda' or 'cpu').")
-    parser_compress.add_argument("--grid_name", type=str, default="density", help="Name of the grid to compress.")
-    parser_compress.add_argument("--model_path", type=str, default="models/vqvae.pth",
-                                 help="Path to the trained model.")
-    parser_compress.add_argument("--num_embeddings", type=int, default=256,
-                                 help="Size of the codebook (must match trained model).")
-    parser_compress.add_argument("--embedding_dim", type=int, default=128,
-                                 help="Dimension of the latent vectors (must match trained model).")
-    parser_compress.set_defaults(func=compress_vdb)
-
-    args = parser.parse_args()
-    args.func(args)
