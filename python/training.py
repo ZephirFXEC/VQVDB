@@ -39,11 +39,11 @@ def train(args):
     # Hyperparameters
     BATCH_SIZE = 2048
     EPOCHS = 30
-    LR = 4e-4
+    LR = 1e-4
     IN_CHANNELS = 1
     EMBEDDING_DIM = 128  # The dimensionality of the embeddings
     NUM_EMBEDDINGS = 256  # The size of the codebook (the "dictionary")
-    COMMITMENT_COST = 0.5
+    COMMITMENT_COST = 0.25
 
     device = torch.device("cuda")
     print(f"Using device: {device}")
@@ -55,7 +55,7 @@ def train(args):
     print(f"Found {len(npy_files)} .npy files")
 
     vdb_dataset = VDBLeafDataset(npy_files=npy_files, include_origins=False, in_channels=IN_CHANNELS)
-    vdb_dataset = torch.utils.data.Subset(vdb_dataset, range(0, len(vdb_dataset), 8))  # Subsample to reduce dataset size
+    vdb_dataset = torch.utils.data.Subset(vdb_dataset, range(0, len(vdb_dataset), 6))  # Subsample to reduce dataset size
     print(f"Dataset created with {len(vdb_dataset)} total blocks.")
 
     # Split dataset randomly with 90% for training and 10% for validation
@@ -89,19 +89,11 @@ def train(args):
     optimizer = AdamW(model.parameters(), lr=LR, weight_decay=1e-4, betas=(0.9, 0.999))
 
     # Better scheduler with warmup
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(
-        optimizer, 
-        max_lr=LR,
-        total_steps=EPOCHS * len(train_loader),
-        pct_start=0.1,
-        anneal_strategy='cos'
-    )
+    scheduler = CosineAnnealingLR(optimizer, T_max=EPOCHS * len(train_loader))
 
     # Mixed precision training
     scaler = torch.GradScaler()
 
-    # Gradient clipping
-    MAX_GRAD_NORM = 1.0
 
     print("Starting training with data from DataLoader...")
     best_val_loss = float('inf')
@@ -121,7 +113,6 @@ def train(args):
         model.train()
         total_recon_loss = 0.0
         total_vq_loss = 0.0
-        total_gradient_loss = 0.0
         last_perplexity = 0.0
         
         # Store encoder outputs for dead code reset (outside autocast)
@@ -142,15 +133,11 @@ def train(args):
                 recon_mse = F.mse_loss(recon_norm, leaves_norm)
                 recon_l1 = F.l1_loss(recon_norm, leaves_norm)
                 
-                # Better 3D gradient loss
-                gradient_loss = compute_gradient_loss(recon_norm, leaves_norm, sobel_x, sobel_y, sobel_z)
-                
                 # Adaptive loss weighting
-                mse_weight = 0.7
+                mse_weight = 0.8
                 l1_weight = 0.2
-                grad_weight = min(0.1 * (epoch + 1) / 10, 0.15)
                 
-                recon_error = mse_weight * recon_mse + l1_weight * recon_l1 + grad_weight * gradient_loss
+                recon_error = mse_weight * recon_mse + l1_weight * recon_l1
                 loss = recon_error + vq_loss
             
             # Store encoder outputs for dead code reset (outside autocast to avoid dtype issues)
@@ -162,7 +149,6 @@ def train(args):
             
             # Gradient clipping
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
             
             scaler.step(optimizer)
             scaler.update()
@@ -171,14 +157,12 @@ def train(args):
             # Update running losses
             total_recon_loss += recon_error.item()
             total_vq_loss += vq_loss.item()
-            total_gradient_loss += gradient_loss.item()
             last_perplexity = perplexity.item()
             
             # Update progress bar
             pbar.set_postfix(
                 recon_loss=recon_error.item(),
                 vq_loss=vq_loss.item(),
-                grad_loss=gradient_loss.item(),
                 ppl=last_perplexity,
                 lr=scheduler.get_last_lr()[0]
             )
@@ -191,7 +175,6 @@ def train(args):
         model.eval()
         val_recon_loss = 0.0
         val_vq_loss = 0.0
-        val_gradient_loss = 0.0
         
         with torch.no_grad():
             for batch in val_loader:
@@ -203,23 +186,16 @@ def train(args):
                     # Same loss computation for validation
                     recon_mse = F.mse_loss(recon_norm, leaves_norm)
                     recon_l1 = F.l1_loss(recon_norm, leaves_norm)
-                    gradient_loss = compute_gradient_loss(recon_norm, leaves_norm, sobel_x, sobel_y, sobel_z)
-                    
-                    grad_weight = min(0.1 * (epoch + 1) / 10, 0.15)
-                    recon_error = 0.7 * recon_mse + 0.2 * recon_l1 + grad_weight * gradient_loss
                     
                     val_recon_loss += recon_error.item()
                     val_vq_loss += vq_loss.item()
-                    val_gradient_loss += gradient_loss.item()
         
         # Calculate averages
         avg_train_recon = total_recon_loss / len(train_loader)
         avg_train_vq = total_vq_loss / len(train_loader)
-        avg_train_grad = total_gradient_loss / len(train_loader)
         
         avg_val_recon = val_recon_loss / len(val_loader)
         avg_val_vq = val_vq_loss / len(val_loader)
-        avg_val_grad = val_gradient_loss / len(val_loader)
         avg_val_loss = avg_val_recon + avg_val_vq
         
         # Store in tracking lists
@@ -252,7 +228,6 @@ def train(args):
             f"\nEpoch {epoch+1:02d}/{EPOCHS} | "
             f"Train Recon: {avg_train_recon:.6f} | "
             f"Train VQ: {avg_train_vq:.6f} | "
-            f"Train Grad: {avg_train_grad:.6f} | "
             f"Val Loss: {avg_val_loss:.6f} | "
             f"Perplexity: {last_perplexity:.2f} | "
             f"LR: {scheduler.get_last_lr()[0]:.2e}"
