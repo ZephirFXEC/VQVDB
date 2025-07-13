@@ -8,29 +8,32 @@
 
 
 struct VQVDBMetadata {
-	uint8_t fileVersion = 0;
+	std::string name;
+	uint8_t fileVersion = 3;
 	uint32_t numEmbeddings = 0;
 	std::vector<int64_t> latentShape;
 	size_t totalBlocks = 0;
 
-	openvdb::Vec3f voxelSize{1.0, 1.0, 1.0};
-	openvdb::math::Mat4f transform;
+	openvdb::Vec3f voxelSize{1.0f, 1.0f, 1.0f};
+	openvdb::math::Mat4d transform;
 
 	VQVDBMetadata() { transform.identity(); }
 };
 
 #pragma pack(push, 1)
-struct VQVDBHeader {
-	char magic[5] = {'V', 'Q', 'V', 'D', 'B'};
-	uint8_t version = 2;
-	uint32_t numEmbeddings = 0;
-	uint8_t latentDimCount = 0;
-	uint32_t headerExtensionSize = 0;
-};
 
 struct VQVDBHeaderExtension {
 	float voxelSize[3];
 	double transform[16];
+};
+
+struct VQVDBFileHeader {
+	char magic[5] = {'V', 'Q', 'V', 'D', 'B'};
+	uint8_t version = 3;
+	uint32_t numGrids = 0;
+	uint32_t numEmbeddings = 0;
+	uint8_t latentDimCount = 0;
+	uint32_t headerExtensionSize = sizeof(VQVDBHeaderExtension);
 };
 #pragma pack(pop)
 
@@ -42,23 +45,34 @@ struct EncodedBatch {
 
 class VDBStreamWriter {
    public:
-	VDBStreamWriter(std::string_view outPath, const VQVDBMetadata& metadata);
-
+	explicit VDBStreamWriter(std::string_view outPath);
 	~VDBStreamWriter() noexcept;
 
-	// Writes a batch of encoded data and their origins to the internal buffer,
-	// flushing to disk when the buffer is full.
+	// Non-copyable and non-movable
+	VDBStreamWriter(const VDBStreamWriter&) = delete;
+	VDBStreamWriter& operator=(const VDBStreamWriter&) = delete;
+	VDBStreamWriter(VDBStreamWriter&&) = delete;
+	VDBStreamWriter& operator=(VDBStreamWriter&&) = delete;
+
+	void startGrid(const VQVDBMetadata& metadata);
 	void writeBatch(const torch::Tensor& encodedIndices, const std::vector<openvdb::Coord>& origins);
+	void endGrid();
+	void close();
 
    private:
 	void flush();
-
+	void finalizeHeader();
 
 	std::ofstream fileStream_;
-	const size_t blockDataSize_;
-	const size_t chunkSize_;  // sizeof(Coord) + blockDataSize_
+	size_t blockDataSize_ = 0;
+	size_t chunkSize_ = 0;
 
-	// Use a large buffer (e.g., 4MB) for optimized disk writes
+	// State for deferred header writing
+	uint32_t numGrids_ = 0;
+	bool headerFinalized_ = false;
+	uint32_t sharedNumEmbeddings_ = 0;
+	uint8_t sharedLatentDimCount_ = 0;
+
 	static constexpr size_t IO_BUFFER_SIZE = 4 * 1024 * 1024;
 	std::vector<char> buffer_;
 	size_t bufferOffset_ = 0;
@@ -70,27 +84,33 @@ class VDBStreamReader {
 	explicit VDBStreamReader(std::string_view inPath);
 	~VDBStreamReader() noexcept = default;
 
-	[[nodiscard]] bool hasNext() const noexcept { return blocksRead_ < metadata_.totalBlocks; }
+	// Non-copyable and non-movable
+	VDBStreamReader(const VDBStreamReader&) = delete;
+	VDBStreamReader& operator=(const VDBStreamReader&) = delete;
+	VDBStreamReader(VDBStreamReader&&) = delete;
+	VDBStreamReader& operator=(VDBStreamReader&&) = delete;
+
+	[[nodiscard]] bool hasNextGrid() const noexcept { return currentGrid_ < numGrids_; }
+	VQVDBMetadata nextGridMetadata();
+	[[nodiscard]] bool hasNext() const noexcept { return blocksRead_ < currentMetadata_.totalBlocks; }
 	EncodedBatch nextBatch(size_t maxBatch);
-
-	// Accessors for metadata
-	[[nodiscard]] size_t totalBlocks() const noexcept { return metadata_.totalBlocks; }
-	[[nodiscard]] const VQVDBMetadata& getMetadata() const noexcept { return metadata_; }
-
 
    private:
 	void refillBuffer();
 
-	VQVDBMetadata metadata_;
 	std::ifstream fileStream_;
+	uint32_t numGrids_ = 0;
+	uint32_t currentGrid_ = 0;
+	uint32_t sharedNumEmbeddings_ = 0;
+	uint8_t sharedLatentDimCount_ = 0;
+	VQVDBMetadata currentMetadata_;
 	size_t blocksRead_ = 0;
-
 	size_t blockDataSize_ = 0;
-	size_t chunkSize_ = 0;  // sizeof(Coord) + blockDataSize_
+	size_t chunkSize_ = 0;
+	size_t remainingDataBytes_ = 0;
 
-	// I/O Buffer
-	static constexpr size_t IO_BUFFER_SIZE = 4 * 1024 * 1024;
+	static constexpr size_t IO_BUFFER_SIZE = 64 * 1024 * 1024;
 	std::vector<char> buffer_;
 	size_t bufferOffset_ = 0;
-	size_t bufferBytes_ = 0;  // Valid bytes in buffer
+	size_t bufferBytes_ = 0;
 };

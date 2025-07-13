@@ -83,7 +83,7 @@ void SOP_VQVDB_DecoderVerb::cook(const CookParms& cookparms) const {
 	if (in_path.empty()) {
 		return;
 	}
-	openvdb::FloatGrid::Ptr output_grid = openvdb::FloatGrid::create();
+	std::vector<openvdb::FloatGrid::Ptr> output_grid;
 
 	try {
 		// --- Run Decoder ---
@@ -94,5 +94,7 @@ void SOP_VQVDB_DecoderVerb::cook(const CookParms& cookparms) const {
 		cookparms.sopAddError(SOP_MESSAGE, e.what());
 	}
 
-	GU_PrimVDB::buildFromGrid(*gdp, output_grid, nullptr, sopparms.getVdbname());
+	for (const auto& grid : output_grid) {
+		GU_PrimVDB::buildFromGrid(*gdp, grid, nullptr, grid->getName().c_str());
+	}
 }

@@ -5,7 +5,6 @@
 #pragma once
 
 #include <torch/torch.h>
-
 #include "IVQVAECodec.hpp"
 
 class TorchBackend : public IVQVAECodec {
