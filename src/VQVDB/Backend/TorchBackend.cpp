@@ -5,67 +5,122 @@
 #include "TorchBackend.hpp"
 
 #include <torch/script.h>
+#include <torch/torch.h>
 
+#include <fstream>
+#include <iostream>
 #include <sstream>
+#include <stdexcept>
 
+// Include the binary data for the embedded model.
+// This header should define g_model_data (unsigned char*) and g_model_data_size (size_t).
 #include "../Bin/bin_model.h"
 
-using torch::kCPU;
-using torch::kFloat32;
-using torch::kLong;
-using torch::kU8;
-
 namespace {
-std::tuple<torch::jit::Module, torch::jit::Method, torch::jit::Method> load_embedded_model(const torch::Device& device) {
-	// Create a string stream from the embedded byte array
-	const std::string model_string(reinterpret_cast<const char*>(g_model_data), g_model_data_size);
-	std::istringstream stream(model_string);
 
+// --- Model Loading ---
+
+torch::jit::Module load_model_from_stream(std::istream& stream, const torch::Device& device) {
 	torch::jit::Module module;
 	try {
-		// Load the model from the stream (onto CPU by default)
-		module = torch::jit::load(stream);
+		// Load from the stream. The device argument tells libtorch where to place the model directly.
+		module = torch::jit::load(stream, device);
 	} catch (const c10::Error& e) {
-		throw std::runtime_error("Failed to load TorchScript model from memory: " + std::string(e.what()));
+		throw std::runtime_error("Failed to load TorchScript model from stream: " + std::string(e.what()));
+	}
+	module.eval();  // Set to evaluation mode
+	return module;
+}
+torch::jit::Module load_model(const ModelSource& source, const torch::Device& device) {
+	if (std::holds_alternative<EmbeddedModel>(source)) {
+		std::cout << "TorchBackend: Loading embedded model." << std::endl;
+
+		std::stringstream model_stream;
+		model_stream.write(reinterpret_cast<const char*>(g_model_data), g_model_data_size);
+
+		// The stream is now ready to be used by libtorch.
+		return load_model_from_stream(model_stream, device);
 	}
 
-	module.to(device);
-	module.eval();
+	if (std::holds_alternative<std::filesystem::path>(source)) {
+		const auto& path = std::get<std::filesystem::path>(source);
+		std::cout << "TorchBackend: Loading model from path: " << path << std::endl;
+		if (!std::filesystem::exists(path)) {
+			throw std::runtime_error("Model file not found at path: " + path.string());
+		}
+		std::ifstream stream(path, std::ios::binary);
+		return load_model_from_stream(stream, device);
+	}
 
-	// Get the methods from the now-configured module
-	torch::jit::Method encode_method = module.get_method("encode");
-	torch::jit::Method decode_method = module.get_method("decode");
-
-	std::cout << "TorchBackend: Model successfully loaded onto device: " << device << std::endl;
-
-	// Return all the constructed objects in a tuple
-	return {std::move(module), std::move(encode_method), std::move(decode_method)};
+	throw std::logic_error("Unsupported model source type.");
 }
+
+// --- Device and Threading ---
+
+torch::Device resolve_torch_device(const CodecConfig::Device device_enum) {
+	if (device_enum == CodecConfig::Device::CUDA) {
+		if (torch::cuda::is_available()) {
+			return torch::kCUDA;
+		}
+		std::cerr << "Warning: CUDA requested but not available. Falling back to CPU." << std::endl;
+	}
+	return torch::kCPU;
+}
+
+void configure_cpu_threads() {
+	const int num_threads = std::max(1, (int)std::thread::hardware_concurrency() / 2);
+	torch::set_num_threads(num_threads);
+	std::cout << "TorchBackend: Set CPU threads to " << torch::get_num_threads() << std::endl;
+}
+
 }  // namespace
 
-TorchBackend::TorchBackend()
-    : device_(torch::cuda::is_available() ? torch::kCUDA : torch::kCPU),
-      model_parts_(load_embedded_model(device_)),
-      module_(std::get<0>(model_parts_)),
-      encodeMethod_(std::get<1>(model_parts_)),
-      decodeMethod_(std::get<2>(model_parts_)) {
+// --- Factory Function Implementation ---
+std::unique_ptr<IVQVAECodec> IVQVAECodec::create(const CodecConfig& config) {
+	try {
+		return std::unique_ptr<IVQVAECodec>(new TorchBackend(config));
+	} catch (const std::exception& e) {
+		std::cerr << "Failed to create TorchBackend: " << e.what() << std::endl;
+		return nullptr;
+	}
+}
+
+// --- TorchBackend Implementation ---
+
+TorchBackend::TorchBackend(const CodecConfig& config)
+    : device_(resolve_torch_device(config.device)),
+      module_(load_model(config.source, device_)),
+      encodeMethod_(module_.get_method("encode")),
+      decodeMethod_(module_.get_method("decode")) {
 	if (device_.is_cpu()) {
-		const int num_threads = std::max(1, (int)std::thread::hardware_concurrency() / 2);
-		torch::set_num_threads(num_threads);
-		std::cout << "TorchBackend: Set CPU threads to " << torch::get_num_threads() << std::endl;
+		configure_cpu_threads();
 	}
 
-	{
-		torch::NoGradGuard nograd;
-		const auto opts = torch::TensorOptions().dtype(torch::kFloat32).device(device_);
-		torch::Tensor dummyInput = torch::zeros({1, 1, 8, 8, 8}, opts);
-		const auto idx = encodeMethod_({dummyInput}).toTensor();
-		const auto sizes = idx.sizes();
-		latentShape_.assign(sizes.begin() + 1, sizes.end());
+	initialize_latent_shape();
+	std::cout << "TorchBackend: Model successfully loaded onto device: " << device_ << std::endl;
+}
+
+void TorchBackend::initialize_latent_shape() {
+	torch::NoGradGuard nograd;
+	// Create a dummy input tensor on the target device to probe the model
+	const auto opts = torch::TensorOptions().dtype(torch::kFloat32).device(device_);
+	torch::Tensor dummyInput = torch::zeros({1, 1, 8, 8, 8}, opts);
+
+	// Run a dummy encode pass to get the output shape
+	const auto idx = encodeMethod_({dummyInput}).toTensor();
+	const auto& sizes = idx.sizes();
+
+	if (sizes.size() <= 1) {
+		throw std::runtime_error("Encoder output has invalid dimensions.");
 	}
+
+	// The latent shape is the shape of the tensor, excluding the batch dimension
+	latentShape_.assign(sizes.begin() + 1, sizes.end());
 
 	std::cout << "TorchBackend: Detected latent shape: (";
-	for (size_t i = 0; i < latentShape_.size(); ++i) std::cout << latentShape_[i] << (i == latentShape_.size() - 1 ? "" : ", ");
+	for (size_t i = 0; i < latentShape_.size(); ++i) {
+		std::cout << latentShape_[i] << (i == latentShape_.size() - 1 ? "" : ", ");
+	}
 	std::cout << ")" << std::endl;
 }
 
@@ -73,13 +128,13 @@ TorchBackend::TorchBackend()
 torch::Tensor TorchBackend::encode(const torch::Tensor& cpuBatch) const {
 	torch::NoGradGuard g;
 	torch::Tensor deviceBatch = cpuBatch.to(device_, /*non_blocking=*/true);
-	torch::Tensor result = encodeMethod_({deviceBatch}).toTensor();
-	return result.to(torch::kCPU, torch::kU8);
+	torch::IValue output = encodeMethod_({deviceBatch});
+	return output.toTensor().to(torch::kCPU, torch::kUInt8);
 }
 
-torch::Tensor TorchBackend::decode(const torch::Tensor& cpuBatch) const {
+torch::Tensor TorchBackend::decode(const torch::Tensor& cpuIndices) const {
 	torch::NoGradGuard g;
-	torch::Tensor deviceBatch = cpuBatch.to(device_, torch::kLong, /*non_blocking=*/true);
-	torch::Tensor result = decodeMethod_({deviceBatch}).toTensor();
-	return result.to(torch::kCPU, torch::kFloat32);
+	torch::Tensor deviceBatch = cpuIndices.to(device_, torch::kLong, /*non_blocking=*/true);
+	torch::IValue output = decodeMethod_({deviceBatch});
+	return output.toTensor().to(torch::kCPU, torch::kFloat32);
 }

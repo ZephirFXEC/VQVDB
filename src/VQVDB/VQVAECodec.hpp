@@ -5,11 +5,11 @@
 
 #pragma once
 
+#include <UT/UT_Interrupt.h>
 #include <openvdb/openvdb.h>
 #include <torch/script.h>
 
 #include <filesystem>
-#include <string>
 
 #include "Backend/IVQVAECodec.hpp"
 
@@ -23,35 +23,31 @@
 class VQVAECodec {
    public:
 	/**
-	 * @brief Constructs the VQVAECodec.
+	 * @brief Constructs the VQVAECodec, taking ownership of the backend.
+	 * @param backend A unique_ptr to a concrete implementation of IVQVAECodec.
 	 */
-	explicit VQVAECodec(const std::shared_ptr<IVQVAECodec>& backend);
+	explicit VQVAECodec(std::unique_ptr<IVQVAECodec> backend);
+
 
 	/**
-	 * @brief Compresses an OpenVDB FloatGrid into a .vqvdb file.
-	 *
-	 * This method streams leaf blocks from the grid, encodes them in batches,
-	 * and writes the result to a file. The file format stores all block origins
-	 * first, followed by the concatenated stream of encoded data.
-	 *
-	 * @param grids A vector of OpenVDB FloatGrids to compress.
+	 * @brief Compresses OpenVDB FloatGrids into a .vqvdb file.
+	 * @param grids Vector of OpenVDB FloatGrids to compress.
 	 * @param outPath The path for the output .vqvdb file.
-	 * @param batchSize The number of leaf blocks to process in a single GPU batch.
+	 * @param batchSize The number of leaf blocks to process in a single batch.
+	 * @param boss A pointer to Houdini's interrupt handler for progress and cancellation. Can be nullptr.
 	 */
-	void compress(const std::vector<openvdb::FloatGrid::Ptr>& grids, const std::string& outPath, size_t batchSize) const;
+	void compress(const std::vector<openvdb::FloatGrid::Ptr>& grids, const std::filesystem::path& outPath, size_t batchSize,
+	              UT_Interrupt* boss) const;
 
 	/**
-	 * @brief Decompresses a .vqvdb file into an OpenVDB FloatGrid.
-	 *
-	 * This method streams encoded data from the file, decodes it in batches,
-	 * and reconstructs the grid. It's memory-efficient as it doesn't load all
-	 * encoded data at once.
-	 *
+	 * @brief Decompresses a .vqvdb file into OpenVDB FloatGrids.
 	 * @param inPath The path to the input .vqvdb file.
-	 * @param grids A vector of OpenVDB FloatGrids which will be created and populated.
-	 * @param batchSize The number of leaf blocks to process in a single GPU batch.
+	 * @param grids An empty vector that will be populated with the created grids.
+	 * @param batchSize The number of leaf blocks to process in a single batch.
+	 * @param boss A pointer to Houdini's interrupt handler for progress and cancellation. Can be nullptr.
 	 */
-	void decompress(const std::string& inPath, std::vector<openvdb::FloatGrid::Ptr>& grids, size_t batchSize) const;
+	void decompress(const std::filesystem::path& inPath, std::vector<openvdb::FloatGrid::Ptr>& grids, size_t batchSize,
+	                UT_Interrupt* boss) const;
 
    private:
 	/**
@@ -68,5 +64,5 @@ class VQVAECodec {
 	 */
 	[[nodiscard]] torch::Tensor decodeBatch(const torch::Tensor& cpuBatch) const;
 
-	std::shared_ptr<IVQVAECodec> backend_;
+	std::unique_ptr<IVQVAECodec> backend_;
 };
