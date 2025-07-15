@@ -35,6 +35,9 @@ torch::jit::Module load_model(const ModelSource& source, const torch::Device& de
 	if (std::holds_alternative<EmbeddedModel>(source)) {
 		std::cout << "TorchBackend: Loading embedded model." << std::endl;
 
+		// *** THE FIX: Use std::stringstream ***
+		// This creates an in-memory stream that is fully seekable, which torch::jit::load requires.
+		// It involves one copy of the model data, which is acceptable for a one-time load.
 		std::stringstream model_stream;
 		model_stream.write(reinterpret_cast<const char*>(g_model_data), g_model_data_size);
 
@@ -68,6 +71,9 @@ torch::Device resolve_torch_device(const CodecConfig::Device device_enum) {
 }
 
 void configure_cpu_threads() {
+	// Note: This is a GLOBAL setting in libtorch. Calling this can affect
+	// other libtorch-using parts of the application. It's best to configure
+	// this once at application startup.
 	const int num_threads = std::max(1, (int)std::thread::hardware_concurrency() / 2);
 	torch::set_num_threads(num_threads);
 	std::cout << "TorchBackend: Set CPU threads to " << torch::get_num_threads() << std::endl;
@@ -127,14 +133,18 @@ void TorchBackend::initialize_latent_shape() {
 
 torch::Tensor TorchBackend::encode(const torch::Tensor& cpuBatch) const {
 	torch::NoGradGuard g;
+	// Move input tensor to the model's device, non-blocking for GPU transfers
 	torch::Tensor deviceBatch = cpuBatch.to(device_, /*non_blocking=*/true);
 	torch::IValue output = encodeMethod_({deviceBatch});
+	// Move result back to CPU and cast to uint8 as per the interface contract
 	return output.toTensor().to(torch::kCPU, torch::kUInt8);
 }
 
 torch::Tensor TorchBackend::decode(const torch::Tensor& cpuIndices) const {
 	torch::NoGradGuard g;
+	// Indices must be long for embedding lookup; move to device
 	torch::Tensor deviceBatch = cpuIndices.to(device_, torch::kLong, /*non_blocking=*/true);
 	torch::IValue output = decodeMethod_({deviceBatch});
+	// Move result back to CPU and cast to float32 as per the interface contract
 	return output.toTensor().to(torch::kCPU, torch::kFloat32);
 }

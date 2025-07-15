@@ -111,7 +111,7 @@ void SOP_VQVDB_EncoderVerb::cook(const CookParms& cookparms) const {
 			return;
 		}
 
-		// --- Load Grid ---
+		// --- Load Grid --- (Your existing logic is good)
 		std::vector<openvdb::GridBase::Ptr> grids;
 		if (const auto err = loadGrid(input_gdp, grids); err != UT_ERROR_NONE) {
 			cookparms.sopAddError(SOP_MESSAGE, "Failed to load VDB grid from input.");
