@@ -66,16 +66,18 @@ class VDBInputBlockStreamer {
 // =========================================================================================
 // VQVAECodec Method Implementations
 // =========================================================================================
-VQVAECodec::VQVAECodec(const std::shared_ptr<IVQVAECodec>& backend) : backend_(backend) {
+VQVAECodec::VQVAECodec(std::unique_ptr<IVQVAECodec> backend) : backend_(std::move(backend)) {
 	if (!backend_) {
 		throw std::runtime_error("VQVAECodec: Backend cannot be null.");
 	}
 }
 
-void VQVAECodec::compress(const std::vector<openvdb::FloatGrid::Ptr>& grids, const std::string& outPath, const size_t batchSize) const {
+
+void VQVAECodec::compress(const std::vector<openvdb::FloatGrid::Ptr>& grids, const std::filesystem::path& outPath, size_t batchSize,
+                          UT_Interrupt* boss) const {
 	const auto t0 = std::chrono::high_resolution_clock::now();
 
-	VDBStreamWriter writer(outPath);
+	VDBStreamWriter writer(outPath.string());
 
 	for (size_t g = 0; g < grids.size(); ++g) {
 		const auto& grid = grids[g];
@@ -95,15 +97,19 @@ void VQVAECodec::compress(const std::vector<openvdb::FloatGrid::Ptr>& grids, con
 		metadata.numEmbeddings = 256;  // Assuming fixed codebook size
 		metadata.latentShape = backend_->getLatentShape();
 		metadata.totalBlocks = totalBlocks;
-		metadata.voxelSize = grid->voxelSize();
 		metadata.transform = grid->transform().baseMap()->getAffineMap()->getMat4();
 
 		writer.startGrid(metadata);
 
 		VDBInputBlockStreamer streamer(leafMgr);
 		int64_t blocksProcessed = 0;
+		UT_String progressMessage;
 
 		while (streamer.hasNext()) {
+			if (boss && boss->opInterrupt()) {
+				throw std::runtime_error("Compression cancelled by user.");
+			}
+
 			auto [hostTensor, origins] = streamer.nextBatch(batchSize);
 			if (hostTensor.numel() == 0) break;
 
@@ -111,35 +117,41 @@ void VQVAECodec::compress(const std::vector<openvdb::FloatGrid::Ptr>& grids, con
 			writer.writeBatch(encodedIndices, origins);
 
 			blocksProcessed += hostTensor.size(0);
-			fprintf(stderr, "\rGrid '%s': Processed %lld / %lld blocks...", name.c_str(), (long long)blocksProcessed, totalBlocks);
+			progressMessage.sprintf("Grid '%s': Processed %lld / %lld blocks...", name.c_str(), blocksProcessed, totalBlocks);
+			if (boss) boss->setLongOpText(progressMessage.c_str());
 		}
-		fprintf(stderr, "\n");
 
 		writer.endGrid();
 	}
 
 	const auto t2 = std::chrono::high_resolution_clock::now();
 	const auto compress_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t0).count();
-	printf("\nMulti-Grid Compression Complete in %lld ms.\n", compress_ms);
+	printf("\nGrid Compression Complete in %lld ms.\n", compress_ms);
 }
 
 
-void VQVAECodec::decompress(const std::string& inPath, std::vector<openvdb::FloatGrid::Ptr>& grids, const size_t batchSize) const {
+void VQVAECodec::decompress(const std::filesystem::path& inPath, std::vector<openvdb::FloatGrid::Ptr>& grids, size_t batchSize,
+                            UT_Interrupt* boss) const {
 	const auto t0 = std::chrono::high_resolution_clock::now();
 
-	VDBStreamReader reader(inPath);
+	VDBStreamReader reader(inPath.string());
 	grids.clear();
 
 	const size_t numThreads = tbb::task_scheduler_init::default_num_threads();
+	UT_String progressMessage;
 
 	while (reader.hasNextGrid()) {
+		if (boss && boss->opInterrupt()) {
+			throw std::runtime_error("Decompression cancelled by user.");
+		}
+
 		VQVDBMetadata metadata = reader.nextGridMetadata();
 		const int64_t totalBlocks = metadata.totalBlocks;
 
 		std::cout << "Decompressing grid '" << metadata.name << "' with " << totalBlocks << " blocks...\n";
 
 		auto grid = openvdb::FloatGrid::create();
-		const auto transform = openvdb::math::Transform::createLinearTransform(metadata.transform);
+		const auto transform = openvdb::math::Transform::createLinearTransform(openvdb::Mat4R(metadata.transform));
 		grid->setTransform(transform);
 		grid->setName(metadata.name);
 
@@ -155,6 +167,10 @@ void VQVAECodec::decompress(const std::string& inPath, std::vector<openvdb::Floa
 		std::atomic<int64_t> blocksProcessed = 0;
 
 		while (reader.hasNext()) {
+			if (boss && boss->opInterrupt()) {
+				throw std::runtime_error("Decompression cancelled by user.");
+			}
+
 			EncodedBatch batch = reader.nextBatch(batchSize);
 			if (batch.data.numel() == 0) break;
 
@@ -176,9 +192,10 @@ void VQVAECodec::decompress(const std::string& inPath, std::vector<openvdb::Floa
 			});
 
 			blocksProcessed += numInBatch;
-			fprintf(stderr, "\rProcessed %lld / %lld blocks...", static_cast<long long>(blocksProcessed), totalBlocks);
+			progressMessage.sprintf("Grid '%s': Processed %lld / %lld blocks...", metadata.name.c_str(),
+			                        static_cast<long long>(blocksProcessed), metadata.totalBlocks);
+			if (boss) boss->setLongOpText(progressMessage.c_str());
 		}
-		fprintf(stderr, "\n");
 
 		// Merge thread grids into main grid
 		for (size_t i = 0; i < numThreads; ++i) {

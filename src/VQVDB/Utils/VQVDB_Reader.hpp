@@ -13,9 +13,7 @@ struct VQVDBMetadata {
 	uint32_t numEmbeddings = 0;
 	std::vector<int64_t> latentShape;
 	size_t totalBlocks = 0;
-
-	openvdb::Vec3f voxelSize{1.0f, 1.0f, 1.0f};
-	openvdb::math::Mat4d transform;
+	openvdb::math::Mat4s transform;
 
 	VQVDBMetadata() { transform.identity(); }
 };
@@ -23,17 +21,15 @@ struct VQVDBMetadata {
 #pragma pack(push, 1)
 
 struct VQVDBHeaderExtension {
-	float voxelSize[3];
-	double transform[16];
+	float transform[16];
 };
 
 struct VQVDBFileHeader {
 	char magic[5] = {'V', 'Q', 'V', 'D', 'B'};
 	uint8_t version = 3;
-	uint32_t numGrids = 0;
+	uint8_t numGrids = 0;
 	uint32_t numEmbeddings = 0;
 	uint8_t latentDimCount = 0;
-	uint32_t headerExtensionSize = sizeof(VQVDBHeaderExtension);
 };
 #pragma pack(pop)
 
@@ -68,7 +64,7 @@ class VDBStreamWriter {
 	size_t chunkSize_ = 0;
 
 	// State for deferred header writing
-	uint32_t numGrids_ = 0;
+	uint8_t numGrids_ = 0;
 	bool headerFinalized_ = false;
 	uint32_t sharedNumEmbeddings_ = 0;
 	uint8_t sharedLatentDimCount_ = 0;

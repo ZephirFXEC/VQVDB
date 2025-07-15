@@ -101,14 +101,13 @@ void VDBStreamWriter::startGrid(const VQVDBMetadata& metadata) {
 
 	// Write grid-specific metadata
 	// Write name
-	const uint32_t nameLength = static_cast<uint32_t>(metadata.name.size());
+	uint32_t nameLength = static_cast<uint32_t>(metadata.name.size());
 	fileStream_.write(reinterpret_cast<const char*>(&nameLength), sizeof(nameLength));
 	fileStream_.write(metadata.name.data(), nameLength);
 
 	// Write extension
 	VQVDBHeaderExtension extension{};
-	std::memcpy(extension.voxelSize, metadata.voxelSize.asPointer(), 3 * sizeof(float));
-	std::memcpy(extension.transform, metadata.transform.asPointer(), 16 * sizeof(double));
+	std::memcpy(extension.transform, metadata.transform.asPointer(), 16 * sizeof(float));
 	fileStream_.write(reinterpret_cast<const char*>(&extension), sizeof(extension));
 
 	// Write latent shape (vector of uint16_t)
@@ -200,8 +199,7 @@ VQVDBMetadata VDBStreamReader::nextGridMetadata() {
 	fileStream_.read(reinterpret_cast<char*>(&extension), sizeof(extension));
 	if (!fileStream_) throw std::runtime_error("Failed to read header extension.");
 
-	metadata.voxelSize = openvdb::Vec3f(extension.voxelSize);
-	metadata.transform = openvdb::math::Mat4d(extension.transform);
+	metadata.transform = openvdb::math::Mat4s(extension.transform);
 
 	// Read latent shape
 	if (sharedLatentDimCount_ > 0) {

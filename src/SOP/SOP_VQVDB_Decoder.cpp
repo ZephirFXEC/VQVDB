@@ -49,15 +49,30 @@ const SOP_NodeVerb::Register<SOP_VQVDB_DecoderVerb> SOP_VQVDB_DecoderVerb::theVe
 const SOP_NodeVerb* SOP_VQVDB_Decoder::cookVerb() const { return SOP_VQVDB_DecoderVerb::theVerb.get(); }
 
 bool SOP_VQVDB_DecoderCache::initializeCodec() {
-	// If codec already exists, do nothing.
 	if (codec_) {
-		return true;
+		return true;  // Already initialized
 	}
 
 	try {
-		auto backend = std::make_shared<TorchBackend>();
-		codec_ = std::make_unique<VQVAECodec>(backend);
+		// 1. Create a configuration for the backend.
+		//    This could be expanded to read from SOP parameters (e.g., a "Device" menu).
+		CodecConfig config;
+		config.device = torch::cuda::is_available() ? CodecConfig::Device::CUDA : CodecConfig::Device::CPU;
+		config.source = EmbeddedModel{};  // Use the embedded model
+
+		// 2. Use the factory to create the backend.
+		std::unique_ptr<IVQVAECodec> backend = IVQVAECodec::create(config);
+		if (!backend) {
+			// The factory will have printed an error. We just need to fail.
+			return false;
+		}
+
+		// 3. Create the high-level VQVAECodec, giving it ownership of the backend.
+		codec_ = std::make_unique<VQVAECodec>(std::move(backend));
+
 	} catch (const std::exception& e) {
+		// Catch potential errors from std::make_unique or the VQVAECodec constructor.
+		std::cerr << "Caught exception during codec initialization: " << e.what() << std::endl;
 		codec_.reset();
 		return false;
 	}
@@ -69,32 +84,43 @@ void SOP_VQVDB_DecoderVerb::cook(const CookParms& cookparms) const {
 	auto& sopparms = cookparms.parms<SOP_VQVDB_DecoderParms>();
 	const auto sopcache = dynamic_cast<SOP_VQVDB_DecoderCache*>(cookparms.cache());
 
-	GU_Detail* gdp = cookparms.gdh().gdpNC();
-
-	// init codec if not already initialized
 	if (!sopcache || !sopcache->initializeCodec()) {
-		cookparms.sopAddError(SOP_MESSAGE, "Failed to initialize VQVDB codec.");
+		cookparms.sopAddError(SOP_MESSAGE, "Failed to initialize VQ-VDB codec backend.");
 		return;
 	}
 
-
-	const auto& in_path = sopparms.getInputfile();
-
+	const std::filesystem::path in_path{sopparms.getInputfile().toStdString()};
 	if (in_path.empty()) {
+		return;  // No file specified, do nothing.
+	}
+	if (!std::filesystem::exists(in_path)) {
+		cookparms.sopAddError(SOP_MESSAGE, "Input file does not exist.");
 		return;
 	}
-	std::vector<openvdb::FloatGrid::Ptr> output_grid;
 
+	std::vector<openvdb::FloatGrid::Ptr> output_grids;
 	try {
-		// --- Run Decoder ---
 		cookparms.sopAddMessage(SOP_MESSAGE, "Starting VQ-VDB decoding...");
 
-		sopcache->codec_->decompress(in_path.data(), output_grid, sopparms.getBatchsize());
+		// Get the interrupt handler for progress updates and cancellation.
+		UT_Interrupt boss("Decompressing...");
+		boss.setEnabled(1);  // Enable progress and cancellation.
+
+		// Call the decompress method.
+		sopcache->codec_->decompress(in_path, output_grids, sopparms.getBatchsize(), &boss);
+
+		boss.setEnabled(0);
+
 	} catch (const std::exception& e) {
 		cookparms.sopAddError(SOP_MESSAGE, e.what());
+		return;  // Stop execution on error
 	}
 
-	for (const auto& grid : output_grid) {
+	// If we are here, decoding was successful.
+	GU_Detail* gdp = cookparms.gdh().gdpNC();
+	gdp->clearAndDestroy();  // Clear any existing geometry.
+
+	for (const auto& grid : output_grids) {
 		GU_PrimVDB::buildFromGrid(*gdp, grid, nullptr, grid->getName().c_str());
 	}
 }
