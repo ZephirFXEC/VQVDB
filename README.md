@@ -16,7 +16,7 @@
 </div>
 <br>
 
-# Oveview 
+# Overview 
 
 VQVDB is a deep learning–powered compressor for volumetric data stored in OpenVDB. 
 It uses Vector Quantized Variational Autoencoders (VQ-VAE) to learn a compact latent space and achieves up to 32× compression of float voxel grids, nearly lossless at the visual level.
