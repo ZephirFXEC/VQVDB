@@ -9,6 +9,7 @@ option(ENABLE_IREE_CUDA  "Build IREE-CUDA back-end"         OFF)
 # ─────────── Core include / source lists ──────────────────────────────────
 set(VQVDB_CORE_SRCS
         src/VQVDB/Utils/Utils.cpp
+        src/VQVDB/Utils/Profiler.cpp
         src/VQVDB/Utils/VQVDB_Reader.cpp
         src/VQVDB/VQVAECodec.cpp
 )
@@ -132,3 +133,30 @@ add_sop_library(SOP_VQVDB_Decoder
 
 # ─────────── Summary ──────────────────────────────────────────────────────
 message(STATUS "Enabled back-ends: ${BACKEND_LIBS}")
+
+# Resolve dll dependencies
+
+# Install
+
+include(GNUInstallDirs)
+
+install(
+    FILES $<TARGET_RUNTIME_DLLS:SOP_VQVDB_Encoder>
+    DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
+install(
+    DIRECTORY ${CUDAToolkit_BIN_DIR}
+    DESTINATION ${CMAKE_INSTALL_BINDIR}
+    FILES_MATCHING PATTERN "*.dll"
+)
+
+install(
+    FILES ${CMAKE_SOURCE_DIR}/houdini_package/vqvdb.json
+    DESTINATION houdini_package
+)
+
+install(
+    FILES $<TARGET_FILE:SOP_VQVDB_Encoder> $<TARGET_FILE:SOP_VQVDB_Decoder>
+    DESTINATION dso
+)
