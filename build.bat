@@ -13,6 +13,7 @@ set VERSION="0.0.0"
 set INSTALL=0
 set INSTALLDIR=%CD%\install
 set "HOUPATH="
+set NO_VCPKG_INSTALL=0
 
 for %%x in (%*) do (
     call :ParseArg %%~x
@@ -31,6 +32,7 @@ if %HELP% equ 1 (
     echo       --installdir:^<install_directory_path^>: path to the install directory, default to ./install
     echo       --version:^<version^>: specifies the version, defaults to %VERSION%
     echo       --houdinipath:^<houdini_path^>: specifies the path to HOUDINI
+    echo       --no-vcpkg-install: disables automatic vcpkg package installation, assumes packages are pre-installed
     echo       --help/-h: displays this message and exits
 
     exit /B 0
@@ -38,15 +40,26 @@ if %HELP% equ 1 (
 
 call :LogInfo "Building VQVDB"
 
-if not exist vcpkg (
-    call :LogInfo "Vcpkg can't be found, cloning and preparing it"
-    git clone https://github.com/microsoft/vcpkg.git
-    cd vcpkg
-    call bootstrap-vcpkg.bat
-    cd ..
+if defined VCPKG_ROOT (
+    call :LogInfo "Using existing VCPKG_ROOT from environment: %VCPKG_ROOT%"
+    if not exist "%VCPKG_ROOT%\vcpkg.exe" (
+        call :LogError "VCPKG_ROOT is set but vcpkg.exe not found in it."
+        exit /B 1
+    )
+) else (
+    if exist vcpkg (
+        set VCPKG_ROOT=%CD%\vcpkg
+        call :LogInfo "Using local vcpkg directory: !VCPKG_ROOT!"
+    ) else (
+        call :LogInfo "Vcpkg can't be found, cloning and preparing it"
+        git clone https://github.com/microsoft/vcpkg.git
+        cd vcpkg
+        call bootstrap-vcpkg.bat
+        cd ..
+        set VCPKG_ROOT=%CD%\vcpkg
+    )
 )
 
-set VCPKG_ROOT=%CD%/vcpkg
 set CMAKE_TOOLCHAIN_FILE=%VCPKG_ROOT%/scripts/buildsystems/vcpkg.cmake
 
 echo.!PATH! | findstr /C:"!VCPKG_ROOT!" 1>nul
@@ -82,7 +95,13 @@ if not defined HOUPATH (
 call :LogInfo "Build type: %BUILDTYPE%"
 call :LogInfo "Build version: %VERSION%"
 
-cmake -S . -B build -DRUN_TESTS=%RUNTESTS% -A="%ARCH%" -DVERSION=%VERSION%
+set CMAKE_EXTRA=
+if %NO_VCPKG_INSTALL% equ 1 (
+    set CMAKE_EXTRA=!CMAKE_EXTRA! -DVCPKG_MANIFEST_MODE=OFF
+    call :LogInfo "Disabling automatic vcpkg package installation"
+)
+
+cmake -S . -B build -DRUN_TESTS=%RUNTESTS% -A="%ARCH%" -DVERSION=%VERSION% -DCMAKE_TOOLCHAIN_FILE=!CMAKE_TOOLCHAIN_FILE! !CMAKE_EXTRA!
 
 if %errorlevel% neq 0 (
     call :LogError "Error caught during CMake configuration"
@@ -112,7 +131,7 @@ if %RUNTESTS% equ 1 (
 
 if %INSTALL% equ 1 (
     cmake --install . --config %BUILDTYPE% --prefix %INSTALLDIR%
-    
+
     if %errorlevel% neq 0 (
         call :LogError "Error caught during CMake installation"
         cd ..
@@ -140,6 +159,8 @@ if "%~1" equ "--tests" set RUNTESTS=1
 if "%~1" equ "--clean" set REMOVEOLDDIR=1
 
 if "%~1" equ "--install" set INSTALL=1
+
+if "%~1" equ "--no-vcpkg-install" set NO_VCPKG_INSTALL=1
 
 if "%~1" equ "--export-compile-commands" (
     call :LogWarning "Exporting compile commands is not supported on Windows for now"
