@@ -1,0 +1,10 @@
+{
+    "dependencies": [
+        {
+            "name": "libtorch",
+            "features": [
+                "cuda"
+            ]
+        }
+    ]
+}

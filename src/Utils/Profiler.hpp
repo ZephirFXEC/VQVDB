@@ -11,10 +11,7 @@
  */
 class PerformanceProfiler {
    public:
-	static PerformanceProfiler& getInstance() {
-		static PerformanceProfiler instance;
-		return instance;
-	}
+	static PerformanceProfiler& getInstance();
 
 	void startTimer(const std::string& name) { startTimes_[name] = std::chrono::high_resolution_clock::now(); }
 
