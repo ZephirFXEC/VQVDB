@@ -29,16 +29,26 @@ class OnnxBackend final : public IVQVAECodec {
 	explicit OnnxBackend(const CodecConfig& config);
 
 	void initialize_latent_shape();
-	std::vector<uint8_t> load_model_data(const ModelSource& source);
+	static std::vector<uint8_t> load_model_data(const std::filesystem::path& path);
+	void setup_sessions(const ModelSource& source);
 
 	Ort::Env env_;
 	Ort::SessionOptions sessionOptions_;
-	std::unique_ptr<Ort::Session> session_;
+	std::unique_ptr<Ort::Session> encoderSession_;
+	std::unique_ptr<Ort::Session> decoderSession_;
 	Ort::AllocatorWithDefaultOptions allocator_;
 
-	// Input/output names for the ONNX model
-	std::vector<const char*> inputNames_;
-	std::vector<const char*> outputNames_;
+	// Input/output names for the ONNX models
+	std::vector<const char*> encoderInputNames_;
+	std::vector<const char*> encoderOutputNames_;
+	std::vector<const char*> decoderInputNames_;
+	std::vector<const char*> decoderOutputNames_;
+
+	// Pointer holders to keep allocations alive
+	std::vector<Ort::AllocatedStringPtr> encoderInputNamePtrs_;
+	std::vector<Ort::AllocatedStringPtr> encoderOutputNamePtrs_;
+	std::vector<Ort::AllocatedStringPtr> decoderInputNamePtrs_;
+	std::vector<Ort::AllocatedStringPtr> decoderOutputNamePtrs_;
 
 	// Model metadata
 	std::vector<int64_t> latentShape_;

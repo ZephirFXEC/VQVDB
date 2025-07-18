@@ -16,10 +16,11 @@ if (UNIX)
     set(openvdb_lib "$ENV{HFS}/dsolib/libopenvdb_sesi.so")
 else ()
     set(openvdb_lib "$ENV{HFS}/custom/houdini/dsolib/openvdb_sesi.lib")
+    set(onnxruntime_lib "$ENV{HFS}/custom/houdini/dsolib/onnxruntime.lib")
 endif ()
 
 add_library(HoudiniVDB INTERFACE)
-target_link_libraries(HoudiniVDB INTERFACE Houdini ${openvdb_lib})
+target_link_libraries(HoudiniVDB INTERFACE Houdini ${openvdb_lib} ${onnxruntime_lib})
 target_include_directories(HoudiniVDB INTERFACE "$ENV{HFS}/toolkit/include")
 
 if (MSVC)
@@ -84,6 +85,7 @@ endif ()
 # ----- ONNX Backend --------------------------------------------------------
 if (ENABLE_ONNX_BACKEND)
     message(STATUS "Building ONNX backend (using Houdini's runtime)")
+    find_package(CUDAToolkit REQUIRED)
 
     add_library(vqvdb_backend_onnx STATIC
             src/backends/onnx/OnnxBackend.cpp
@@ -92,8 +94,7 @@ if (ENABLE_ONNX_BACKEND)
     # Link against HoudiniVDB. This provides the include paths for onnxruntime
     # headers AND transitively links the necessary onnxruntime library.
     target_link_libraries(vqvdb_backend_onnx
-            PUBLIC vqvdb_core
-            PRIVATE HoudiniVDB
+            PUBLIC vqvdb_core HoudiniVDB CUDA::cudart
     )
     # NO MORE manual linking or DLL copying needed.
     list(APPEND ENABLED_BACKEND_TARGETS vqvdb_backend_onnx)

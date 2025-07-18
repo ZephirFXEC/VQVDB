@@ -3,7 +3,6 @@
 #include <GU/GU_Detail.h>
 #include <UT/UT_DSOVersion.h>
 
-#include "../backends/torch/TorchBackend.hpp"
 #include "../orchestrator/VQVAECodec.hpp"
 #include "Utils/Utils.hpp"
 
@@ -62,7 +61,8 @@ bool SOP_VQVDB_EncoderCache::initializeCodec() {
 	try {
 		CodecConfig config;
 		config.device = CodecConfig::Device::CUDA;
-		config.source = EmbeddedModel{};
+		config.source = OnnxModelPaths{"C:/Users/zphrfx/Desktop/hdk/VQVDB/models/onnx_models/encoder.onnx",
+		                               "C:/Users/zphrfx/Desktop/hdk/VQVDB/models/onnx_models/decoder.onnx"};
 
 		std::unique_ptr<IVQVAECodec> backend = IVQVAECodec::create(config, BackendType::ONNX);
 		if (!backend) {
