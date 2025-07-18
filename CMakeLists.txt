@@ -4,8 +4,8 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # ─────────── Build options ─────────────────────────────────────────────────
-option(ENABLE_TORCH_BACKEND "Build the LibTorch backend" ON)
-option(ENABLE_ONNX_BACKEND "Build the ONNXRuntime backend" OFF)
+option(ENABLE_TORCH_BACKEND "Build the LibTorch backend" OFF)
+option(ENABLE_ONNX_BACKEND "Build the ONNXRuntime backend" ON)
 
 # ─────────── Houdini / OpenVDB ─────────────────────────────────────────────
 # This section is well-structured and remains unchanged.
