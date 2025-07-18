@@ -4,7 +4,7 @@
 
 #include <vector>
 
-#include "../../CORE/IVQVAECodec.hpp"
+#include "core/IVQVAECodec.hpp"
 
 class OnnxBackend final : public IVQVAECodec {
 

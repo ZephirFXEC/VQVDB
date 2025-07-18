@@ -213,6 +213,7 @@ void VQVAECodec::decompress(const std::filesystem::path& inPath, std::vector<ope
 		for (size_t i = 0; i < numThreads; ++i) {
 			grid->tree().merge(threadGrids[i]->tree());
 		}
+
 		grids.push_back(grid);
 	}
 

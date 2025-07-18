@@ -31,7 +31,7 @@ class TorchBackend final : public IVQVAECodec {
 	// IVQVAECodec overrides
 	Tensor encode(const TensorView& leafBatch) const override;
 	Tensor decode(const TensorView& leafBatch) const override;
-	const std::vector<int64_t>& getLatentShape() const noexcept override { return latentShape_; }
+	const std::vector<int64_t>& getLatentShape() const override { return latentShape_; }
 
 
    private:
