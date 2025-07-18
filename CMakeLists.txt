@@ -154,4 +154,66 @@ add_sop_library(SOP_VQVDB_Decoder
 )
 
 # ─────────── Summary ──────────────────────────────────────────────────────
-message(STATUS "Enabled backend targets: ${ENABLED_BACKEND_TARGETS}")
+message(STATUS "Enabled back-ends: ${BACKEND_LIBS}")
+
+# Resolve dll dependencies
+
+# Install
+
+include(GNUInstallDirs)
+
+set(_omp_dir "C:/Windows/System32")
+
+# Torch CPU needs libomp.dll but it is not found by GET_RUNTIME_DEPENDENCIES
+file(GLOB _omp_dlls
+     LIST_DIRECTORIES FALSE
+     "${_omp_dir}/libomp*.dll")
+
+if(NOT _omp_dlls)
+    message(FATAL_ERROR "No OpenMP runtime DLL (libomp*.dll) found in ${_omp_dir}")
+endif()
+
+list(GET _omp_dlls 0 LIBOMP_DLL_PATH)
+message(STATUS "Found OpenMP runtime: ${LIBOMP_DLL_PATH}")
+
+install(FILES "${LIBOMP_DLL_PATH}"
+        DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+install(CODE [[
+    file(GET_RUNTIME_DEPENDENCIES
+         EXECUTABLES  $<TARGET_FILE:SOP_VQVDB_Encoder>
+         RESOLVED_DEPENDENCIES_VAR RESOLVED_DEPS
+         UNRESOLVED_DEPENDENCIES_VAR UNRESOLVED_DEPS
+         PRE_EXCLUDE_REGEXES "api-ms-" "ext-ms-" "hvsifiletrust" "pdmutilities" "aclui" "SOP_VQVDB"
+         POST_EXCLUDE_REGEXES ".*system32/.*\\.dll")
+
+    foreach(FILE ${RESOLVED_DEPS})
+        file(INSTALL
+             DESTINATION "${CMAKE_INSTALL_PREFIX}/bin"
+             TYPE SHARED_LIBRARY
+             FOLLOW_SYMLINK_CHAIN
+             FILES "${FILE}"
+        )
+
+    endforeach()
+]])
+
+# Check which cuda dlls are really needed, for now we copy everything
+file(GLOB CUDA_DLLS
+     LIST_DIRECTORIES FALSE
+#      "${CUDAToolkit_BIN_DIR}/cusparse*.dll"
+     "${CUDAToolkit_BIN_DIR}/*.dll"
+#      "${CUDAToolkit_BIN_DIR}/cublas*.dll"
+#      "${CUDAToolkit_BIN_DIR}/cudnn*.dll"
+#      "${CUDAToolkit_BIN_DIR}/cufft*.dll"
+#      "${CUDAToolkit_BIN_DIR}/cusolver*.dll"
+     )
+
+install(FILES ${CUDA_DLLS}
+        DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+install(FILES ${CMAKE_SOURCE_DIR}/houdini_package/vqvdb.json
+        DESTINATION houdini_package)
+
+install(FILES $<TARGET_FILE:SOP_VQVDB_Encoder> $<TARGET_FILE:SOP_VQVDB_Decoder>
+        DESTINATION dso)
