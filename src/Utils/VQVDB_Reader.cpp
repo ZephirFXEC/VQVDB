@@ -126,9 +126,9 @@ void VDBStreamWriter::startGrid(const VQVDBMetadata& metadata) {
 	bufferOffset_ = 0;
 }
 
-void VDBStreamWriter::writeBatch(const torch::Tensor& encodedIndices, const std::vector<openvdb::Coord>& origins) {
+void VDBStreamWriter::writeBatch(const Tensor& encodedTensor, const std::vector<openvdb::Coord>& origins) {
 	const size_t numBlocksInBatch = origins.size();
-	const uint8_t* dataPtr = encodedIndices.data_ptr<uint8_t>();
+	const auto* dataPtr = encodedTensor.getData<uint8_t>();
 
 	for (size_t i = 0; i < numBlocksInBatch; ++i) {
 		if (bufferOffset_ + chunkSize_ > buffer_.size()) {
@@ -230,27 +230,34 @@ VQVDBMetadata VDBStreamReader::nextGridMetadata() {
 
 
 EncodedBatch VDBStreamReader::nextBatch(const size_t maxBatch) {
-	if (!hasNext()) return {torch::empty({0}), {}};
+	if (!hasNext()) {
+		return {};
+	}
 
+	EncodedBatch batch;  // The object we will return
 	const size_t blocksToRequest = std::min(maxBatch, currentMetadata_.totalBlocks - blocksRead_);
 
-	std::vector<int64_t> tensorShape = {static_cast<int64_t>(blocksToRequest)};
-	tensorShape.insert(tensorShape.end(), currentMetadata_.latentShape.begin(), currentMetadata_.latentShape.end());
-	auto opts = torch::TensorOptions().dtype(torch::kU8).device(torch::kCPU).pinned_memory(true);
-	torch::Tensor data = torch::empty(tensorShape, opts);
+	// 1. Prepare the Tensor metadata
+	batch.data.shape = {static_cast<int64_t>(blocksToRequest)};
+	batch.data.shape.insert(batch.data.shape.end(), currentMetadata_.latentShape.begin(), currentMetadata_.latentShape.end());
+	batch.data.dtype = DataType::UINT8;
 
-	std::vector<openvdb::Coord> originsBatch;
-	originsBatch.reserve(blocksToRequest);
-	auto* dataPtr = data.data_ptr<uint8_t>();
+	// 2. Allocate memory in our Tensor's buffer
+	const size_t totalBytesToRead = blocksToRequest * blockDataSize_;
+	batch.data.buffer.resize(totalBytesToRead);
+	batch.origins.reserve(blocksToRequest);
+
+	// Get a raw pointer to the start of our destination buffer
+	auto* dataPtr = batch.data.getData<uint8_t>();
 
 	size_t blocksProcessed = 0;
 	while (blocksProcessed < blocksToRequest) {
 		const size_t remainingBytesInBuffer = bufferBytes_ - bufferOffset_;
-		size_t blocksAvailableInBuffer = (chunkSize_ > 0) ? (remainingBytesInBuffer / chunkSize_) : 0;
+		const size_t blocksAvailableInBuffer = (chunkSize_ > 0) ? (remainingBytesInBuffer / chunkSize_) : 0;
 
 		if (blocksAvailableInBuffer == 0) {
 			if (fileStream_.eof() || (bufferBytes_ < buffer_.size() && remainingBytesInBuffer < chunkSize_)) {
-				break;
+				break;  // End of file or not enough data for a full chunk
 			}
 			refillBuffer();
 			continue;
@@ -260,8 +267,8 @@ EncodedBatch VDBStreamReader::nextBatch(const size_t maxBatch) {
 
 		const char* currentSrc = buffer_.data() + bufferOffset_;
 		for (size_t i = 0; i < blocksToProcessNow; ++i) {
-			originsBatch.emplace_back();
-			std::memcpy(&originsBatch.back(), currentSrc, sizeof(openvdb::Coord));
+			batch.origins.emplace_back();
+			std::memcpy(&batch.origins.back(), currentSrc, sizeof(openvdb::Coord));
 			std::memcpy(dataPtr, currentSrc + sizeof(openvdb::Coord), blockDataSize_);
 			currentSrc += chunkSize_;
 			dataPtr += blockDataSize_;
@@ -271,18 +278,17 @@ EncodedBatch VDBStreamReader::nextBatch(const size_t maxBatch) {
 		blocksProcessed += blocksToProcessNow;
 	}
 
-	remainingDataBytes_ -= blocksProcessed * chunkSize_;
-
 	if (blocksProcessed < blocksToRequest) {
-		if (remainingDataBytes_ > 0) {
-			throw std::runtime_error("File truncated: Fewer blocks read than expected by metadata.");
-		}
-		tensorShape[0] = static_cast<int64_t>(blocksProcessed);  // Update first dim
-		data = data.resize_(tensorShape);                        // Resize to new shape vector
+		// Shrink the buffer to the actual size read
+		batch.data.buffer.resize(blocksProcessed * blockDataSize_);
+		// Update the shape to reflect the actual batch size
+		batch.data.shape[0] = static_cast<int64_t>(blocksProcessed);
 	}
 
 	blocksRead_ += blocksProcessed;
-	return {data, originsBatch};
+	remainingDataBytes_ -= blocksProcessed * chunkSize_;
+
+	return batch;
 }
 
 

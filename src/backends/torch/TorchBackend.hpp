@@ -6,7 +6,7 @@
 
 #include <torch/torch.h>
 
-#include "IVQVAECodec.hpp"
+#include "core/IVQVAECodec.hpp"
 
 
 /**
@@ -18,7 +18,7 @@
 class TorchBackend final : public IVQVAECodec {
    public:
 	// The factory function in IVQVAECodec is a friend to access the private constructor.
-	friend std::unique_ptr<IVQVAECodec> IVQVAECodec::create(const CodecConfig& config);
+	friend std::unique_ptr<IVQVAECodec> IVQVAECodec::create(const CodecConfig& config, BackendType type);
 
 	~TorchBackend() override = default;
 
@@ -28,9 +28,11 @@ class TorchBackend final : public IVQVAECodec {
 	TorchBackend(TorchBackend&&) = delete;
 	TorchBackend& operator=(TorchBackend&&) = delete;
 
-	torch::Tensor encode(const torch::Tensor& cpuBatch) const override;
-	torch::Tensor decode(const torch::Tensor& cpuBatch) const override;
+	// IVQVAECodec overrides
+	Tensor encode(const TensorView& leafBatch) const override;
+	Tensor decode(const TensorView& leafBatch) const override;
 	const std::vector<int64_t>& getLatentShape() const override { return latentShape_; }
+
 
    private:
 	explicit TorchBackend(const CodecConfig& config);

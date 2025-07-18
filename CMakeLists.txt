@@ -1,27 +1,14 @@
 cmake_minimum_required(VERSION 3.28)
-project(VQVDB LANGUAGES CXX CUDA)
+project(VQVDB LANGUAGES CXX) # CUDA language is not needed at the top-level
 set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # ─────────── Build options ─────────────────────────────────────────────────
-option(ENABLE_TORCH_CPU  "Build Torch-CPU back-end"         ON)
-option(ENABLE_IREE_CUDA  "Build IREE-CUDA back-end"         OFF)
+option(ENABLE_TORCH_BACKEND "Build the LibTorch backend" ON)
+option(ENABLE_ONNX_BACKEND "Build the ONNXRuntime backend" OFF)
 
-# ─────────── Core include / source lists ──────────────────────────────────
-set(VQVDB_CORE_SRCS
-        src/VQVDB/Utils/Utils.cpp
-        src/VQVDB/Utils/VQVDB_Reader.cpp
-        src/VQVDB/VQVAECodec.cpp
-)
-
-set(VQVDB_CORE_HDRS
-        src/VQVDB/Utils/Utils.hpp
-        src/VQVDB/Utils/VQVDB_Reader.hpp
-        src/VQVDB/Utils/Profiler.hpp
-        src/VQVDB/VQVAECodec.hpp
-        src/VQVDB/Backend/IVQVAECodec.hpp
-)
-
-# ─────────── Houdini / OpenVDB (unchanged) ────────────────────────────────
+# ─────────── Houdini / OpenVDB ─────────────────────────────────────────────
+# This section is well-structured and remains unchanged.
 list(APPEND CMAKE_PREFIX_PATH "$ENV{HFS}/toolkit/cmake")
 find_package(Houdini REQUIRED)
 
@@ -33,80 +20,116 @@ endif ()
 
 add_library(HoudiniVDB INTERFACE)
 target_link_libraries(HoudiniVDB INTERFACE Houdini ${openvdb_lib})
-target_include_directories(HoudiniVDB INTERFACE
-        $ENV{HFS}/toolkit/include
+target_include_directories(HoudiniVDB INTERFACE "$ENV{HFS}/toolkit/include")
+
+if (MSVC)
+    add_compile_options(/O2 /Gy /Zc:inline)
+    add_link_options(/OPT:REF /OPT:ICF /INCREMENTAL:NO)
+endif ()
+
+# ─────────── 1. CORE INTERFACE (Header-only) ───────────────────────────────
+# Defines the IVQVAECodec interface. No .cpp files, no ML dependencies.
+# ---------------------------------------------------------------------------
+
+add_library(vqvdb_core INTERFACE)
+target_include_directories(vqvdb_core INTERFACE "src") # Allows #include "VQVDB/Backend/IVQVAECodec.hpp"
+
+# ─────────── 2. ORCHESTRATOR LIBRARY ───────────────────────────────────────
+# The high-level VQVAECodec logic. Depends on the core interface, not on any
+# specific backend implementation.
+# ---------------------------------------------------------------------------
+add_library(vqvdb_orchestrator STATIC
+        src/orchestrator/VQVAECodec.cpp
+        src/orchestrator/VQVAECodec.hpp
+        src/utils/VQVDB_Reader.cpp
+        src/utils/VQVDB_Reader.hpp
+        src/utils/Utils.cpp
+        src/utils/Utils.hpp
+        src/utils/Profiler.hpp
+)
+target_include_directories(vqvdb_orchestrator PUBLIC "src")
+target_link_libraries(vqvdb_orchestrator
+        PUBLIC
+        vqvdb_core
+        HoudiniVDB
 )
 
-add_compile_options(/O2 /Gy /Zc:inline)
-add_link_options(/OPT:REF /OPT:ICF /INCREMENTAL:NO)
+# ─────────── 3. BACKEND IMPLEMENTATIONS ────────────────────────────────────
+# Each backend is a separate static library that links to its specific ML framework.
+# They all depend on the `vqvdb_core` to get the interface definition.
+# ---------------------------------------------------------------------------
+set(ENABLED_BACKEND_TARGETS "")
+set(ENABLED_BACKEND_DEFINITIONS "")
 
-# ─────────── Optional back-ends ───────────────────────────────────────────
-set(BACKEND_LIBS "")
-
-# ----- Torch-CPU ----------------------------------------------------------
-if (ENABLE_TORCH_CPU)
-    message(STATUS "Building Torch back-end")
+# ----- LibTorch Backend ----------------------------------------------------
+if (ENABLE_TORCH_BACKEND)
+    message(STATUS "Building Torch backend")
     list(APPEND CMAKE_PREFIX_PATH "libtorch")
     find_package(Torch REQUIRED)
 
-    add_library(vq_backend_torch_cpu STATIC
-            src/VQVDB/Backend/TorchBackend.cpp
-            src/VQVDB/Backend/TorchBackend.hpp
+    add_library(vqvdb_backend_torch STATIC
+            src/backends/torch/TorchBackend.cpp
+            src/backends/torch/TorchBackend.hpp
     )
-    target_link_libraries(vq_backend_torch_cpu PUBLIC ${TORCH_LIBRARIES})
+    target_link_libraries(vqvdb_backend_torch
+            PUBLIC
+            vqvdb_core
+            ${TORCH_LIBRARIES}
+    )
 
-    list(APPEND BACKEND_LIBS vq_backend_torch_cpu)
+    list(APPEND ENABLED_BACKEND_TARGETS vqvdb_backend_torch)
+    list(APPEND ENABLED_BACKEND_DEFINITIONS "ENABLE_TORCH_BACKEND")
 endif ()
 
-# ----- IREE-CUDA ----------------------------------------------------------
-#[[if (ENABLE_IREE_CUDA)
-    message(STATUS "Building IREE CUDA back-end")
-    find_package(CUDAToolkit REQUIRED)
-    find_package(iree-runtime REQUIRED COMPONENTS hal_cuda runtime)
+# ----- ONNX Backend --------------------------------------------------------
+if (ENABLE_ONNX_BACKEND)
+    message(STATUS "Building ONNX backend (using Houdini's runtime)")
 
-    add_library(vq_backend_iree STATIC
-            src/VQVDB/Backend/IreeBackend.cpp
-            src/VQVDB/Backend/IreeBackend.hpp
+    add_library(vqvdb_backend_onnx STATIC
+            src/backends/onnx/OnnxBackend.cpp
+            src/backends/onnx/OnnxBackend.hpp
     )
-    target_link_libraries(vq_backend_iree
-            PUBLIC iree::runtime
-            iree::runtime::hal_cuda
+    # Link against HoudiniVDB. This provides the include paths for onnxruntime
+    # headers AND transitively links the necessary onnxruntime library.
+    target_link_libraries(vqvdb_backend_onnx
+            PUBLIC vqvdb_core
+            PRIVATE HoudiniVDB
     )
-    list(APPEND BACKEND_LIBS vq_backend_iree)
-endif ()]]
+    # NO MORE manual linking or DLL copying needed.
+    list(APPEND ENABLED_BACKEND_TARGETS vqvdb_backend_onnx)
+    list(APPEND ENABLED_BACKEND_DEFINITIONS "ENABLE_ONNX_BACKEND")
+endif ()
 
-# ─────────── VQVDB umbrella static lib ────────────────────────────────────
-add_library(VQVDB STATIC
-        ${VQVDB_CORE_SRCS} ${VQVDB_CORE_HDRS}
+# ─────────── 4. THE FACTORY ────────────────────────────────────────────────
+# This is the bridge. It contains ONLY the IVQVAECodec::create implementation.
+# It links to all enabled backends so it can instantiate them.
+# ---------------------------------------------------------------------------
+add_library(vqvdb_factory STATIC src/core/IVQVAECodec.cpp)
+target_link_libraries(vqvdb_factory
+        PUBLIC
+        vqvdb_core
+        ${ENABLED_BACKEND_TARGETS} # Link to the actual backend libs
 )
+# Pass definitions to IVQVAECodec.cpp so it knows which headers to include
+target_compile_definitions(vqvdb_factory PRIVATE ${ENABLED_BACKEND_DEFINITIONS})
 
-# All chosen back-ends become PRIVATE deps of VQVDB
-target_link_libraries(VQVDB
-        PUBLIC HoudiniVDB
-        PUBLIC ${BACKEND_LIBS}
-)
 
-target_include_directories(VQVDB PUBLIC
-        "src/VQVDB"
-        "src/VQVDB/Utils"
-)
-
-# ─────────── Helper to build Houdini SOPs (unchanged except linking) ─────
+# ─────────── 5. HOUDINI SOPs ───────────────────────
 function(add_sop_library LIBNAME)
     add_library(${LIBNAME} SHARED ${ARGN})
 
+    # The SOP links to the ORCHESTRATOR and the FACTORY.
+    # The factory transitively pulls in all the enabled backend implementations.
     target_link_libraries(${LIBNAME} PRIVATE
-            HoudiniVDB
-            VQVDB
+            vqvdb_orchestrator
+            vqvdb_factory
     )
 
+    # Standard Houdini configuration
     target_include_directories(${LIBNAME} PRIVATE
             "${CMAKE_CURRENT_SOURCE_DIR}"
             "${CMAKE_CURRENT_BINARY_DIR}"
-            "$ENV{HFS}/toolkit/include"
     )
-    target_compile_features(${LIBNAME} PUBLIC cxx_std_17)
-
     if (DEFINED ENV{DSO_Path})
         houdini_configure_target(${LIBNAME} "$ENV{DSO_Path}")
     else ()
@@ -114,7 +137,7 @@ function(add_sop_library LIBNAME)
     endif ()
 endfunction()
 
-# ─────────── SOP plug-ins themselves ──────────────────────────────────────
+# ─────────── SOP Plug-in Definitions ──────────────────────────────────────
 houdini_generate_proto_headers(FILES
         "src/SOP/SOP_VQVDB_Encoder.cpp"
         "src/SOP/SOP_VQVDB_Decoder.cpp"
@@ -131,4 +154,4 @@ add_sop_library(SOP_VQVDB_Decoder
 )
 
 # ─────────── Summary ──────────────────────────────────────────────────────
-message(STATUS "Enabled back-ends: ${BACKEND_LIBS}")
+message(STATUS "Enabled backend targets: ${ENABLED_BACKEND_TARGETS}")

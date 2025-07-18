@@ -8,8 +8,8 @@
 #include <SOP/SOP_Node.h>
 #include <SOP/SOP_NodeVerb.h>
 
+#include "../orchestrator/VQVAECodec.hpp"
 #include "SOP_VQVDB_Decoder.proto.h"
-#include "VQVAECodec.hpp"
 
 class SOP_VQVDB_Decoder final : public SOP_Node {
 public:

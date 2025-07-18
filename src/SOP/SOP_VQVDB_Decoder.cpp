@@ -3,9 +3,9 @@
 #include <GU/GU_Detail.h>
 #include <UT/UT_DSOVersion.h>
 
-#include "Backend/TorchBackend.hpp"
+#include "../backends/torch/TorchBackend.hpp"
+#include "../orchestrator/VQVAECodec.hpp"
 #include "Utils/Utils.hpp"
-#include "VQVAECodec.hpp"
 
 void newSopOperator(OP_OperatorTable* table) {
 	table->addOperator(new OP_Operator("vqvdb_decoder", "VQVDB Decoder", SOP_VQVDB_Decoder::myConstructor,
@@ -61,7 +61,7 @@ bool SOP_VQVDB_DecoderCache::initializeCodec() {
 		config.source = EmbeddedModel{};  // Use the embedded model
 
 		// 2. Use the factory to create the backend.
-		std::unique_ptr<IVQVAECodec> backend = IVQVAECodec::create(config);
+		std::unique_ptr<IVQVAECodec> backend = IVQVAECodec::create(config, BackendType::LibTorch);
 		if (!backend) {
 			// The factory will have printed an error. We just need to fail.
 			return false;

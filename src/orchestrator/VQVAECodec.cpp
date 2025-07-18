@@ -12,7 +12,7 @@
 #include <iostream>
 #include <vector>
 
-#include "VQVDB_Reader.hpp"
+#include "utils/VQVDB_Reader.hpp"
 
 namespace {
 constexpr int LEAF_LOG2DIM = 3;
@@ -30,20 +30,20 @@ class VDBInputBlockStreamer {
 
 	[[nodiscard]] bool hasNext() const noexcept { return currentPos_ < totalLeaves_; }
 
-	std::pair<torch::Tensor, std::vector<openvdb::Coord>> nextBatch(size_t maxBatch) {
-		if (!hasNext()) return {torch::empty({0}), {}};
+	// Returns a standard vector of floats, not a torch tensor.
+	std::pair<std::vector<float>, std::vector<openvdb::Coord>> nextBatch(size_t maxBatch) {
+		if (!hasNext()) return {{}, {}};
 
 		const size_t start = currentPos_;
 		const size_t end = std::min(start + maxBatch, totalLeaves_);
 		currentPos_ = end;
 		const size_t B = end - start;
 
-		// Use pinned memory for asynchronous H2D copy later
-		auto opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU).pinned_memory(true);
-		torch::Tensor batch = torch::empty({static_cast<long>(B), 1, LEAF_DIM, LEAF_DIM, LEAF_DIM}, opts);
+		// Create a standard vector to hold the batch data.
+		std::vector<float> batchData(B * LEAF_VOXELS);
 		std::vector<openvdb::Coord> origins(B);
 
-		float* dstBase = batch.data_ptr<float>();
+		float* dstBase = batchData.data();
 
 		tbb::parallel_for(tbb::blocked_range<size_t>(0, B), [&](const tbb::blocked_range<size_t>& r) {
 			for (size_t i = r.begin(); i != r.end(); ++i) {
@@ -53,7 +53,7 @@ class VDBInputBlockStreamer {
 			}
 		});
 
-		return {batch, origins};  // Add channel dim: [B, 1, D, D, D]
+		return {batchData, origins};
 	}
 
    private:
@@ -106,21 +106,28 @@ void VQVAECodec::compress(const std::vector<openvdb::FloatGrid::Ptr>& grids, con
 		UT_String progressMessage;
 
 		while (streamer.hasNext()) {
-			if (boss && boss->opInterrupt()) {
-				throw std::runtime_error("Compression cancelled by user.");
-			}
+			if (boss && boss->opInterrupt()) throw std::runtime_error("Compression cancelled.");
 
-			auto [hostTensor, origins] = streamer.nextBatch(batchSize);
-			if (hostTensor.numel() == 0) break;
+			// 1. Get raw float data from the streamer
+			auto [hostData, origins] = streamer.nextBatch(batchSize);
+			if (hostData.empty()) break;
 
-			torch::Tensor encodedIndices = this->encodeBatch(hostTensor);
-			writer.writeBatch(encodedIndices, origins);
+			// 2. Create a non-owning TensorView to wrap the raw data
+			TensorView batchView;
+			batchView.data = hostData.data();
+			batchView.shape = {static_cast<long>(origins.size()), 1, LEAF_DIM, LEAF_DIM, LEAF_DIM};
+			batchView.dtype = DataType::FLOAT32;
 
-			blocksProcessed += hostTensor.size(0);
+			// 3. Encode the batch. The backend handles framework specifics.
+			Tensor encodedTensor = this->encodeBatch(batchView);
+
+			// 4. Write the resulting owning Tensor. (Assumes writer API is updated).
+			writer.writeBatch(encodedTensor, origins);
+
+			blocksProcessed += origins.size();
 			progressMessage.sprintf("Grid '%s': Processed %lld / %lld blocks...", name.c_str(), blocksProcessed, totalBlocks);
 			if (boss) boss->setLongOpText(progressMessage.c_str());
 		}
-
 		writer.endGrid();
 	}
 
@@ -166,22 +173,28 @@ void VQVAECodec::decompress(const std::filesystem::path& inPath, std::vector<ope
 
 		std::atomic<int64_t> blocksProcessed = 0;
 
+
 		while (reader.hasNext()) {
-			if (boss && boss->opInterrupt()) {
-				throw std::runtime_error("Decompression cancelled by user.");
-			}
+			if (boss && boss->opInterrupt()) throw std::runtime_error("Decompression cancelled.");
 
+			// 1. Reader provides a batch (Assumes EncodedBatch now contains a generic Tensor)
 			EncodedBatch batch = reader.nextBatch(batchSize);
-			if (batch.data.numel() == 0) break;
+			if (batch.data.buffer.empty()) break;
 
-			const size_t numInBatch = batch.origins.size();
-			torch::Tensor decodedData = this->decodeBatch(batch.data);
-			const float* decodedDataPtr = decodedData.data_ptr<float>();
+			// 2. Create a non-owning view of the loaded data
+			TensorView indicesView;
+			indicesView.data = batch.data.buffer.data();
+			indicesView.shape = batch.data.shape;
+			indicesView.dtype = batch.data.dtype;
 
-			tbb::parallel_for(tbb::blocked_range<size_t>(0, numInBatch), [&](const tbb::blocked_range<size_t>& r) {
+			// 3. Decode the batch
+			Tensor decodedTensor = this->decodeBatch(indicesView);
+			const float* decodedDataPtr = decodedTensor.getData<float>();  // Use the new getter
+
+			// 4. Parallel reconstruction (this part remains the same)
+			tbb::parallel_for(tbb::blocked_range<size_t>(0, batch.origins.size()), [&](const tbb::blocked_range<size_t>& r) {
 				const size_t threadId = tbb::this_task_arena::current_thread_index() % numThreads;
 				auto& accessor = threadAccessors[threadId];
-
 				for (size_t i = r.begin(); i != r.end(); ++i) {
 					if (auto* leaf = accessor.touchLeaf(batch.origins[i])) {
 						const float* src = decodedDataPtr + i * LEAF_VOXELS;
@@ -191,17 +204,14 @@ void VQVAECodec::decompress(const std::filesystem::path& inPath, std::vector<ope
 				}
 			});
 
-			blocksProcessed += numInBatch;
+			blocksProcessed += batch.origins.size();
 			progressMessage.sprintf("Grid '%s': Processed %lld / %lld blocks...", metadata.name.c_str(),
 			                        static_cast<long long>(blocksProcessed), metadata.totalBlocks);
 			if (boss) boss->setLongOpText(progressMessage.c_str());
 		}
 
-		// Merge thread grids into main grid
 		for (size_t i = 0; i < numThreads; ++i) {
-			if (threadGrids[i]->activeVoxelCount() > 0) {
-				grid->tree().merge(threadGrids[i]->tree());
-			}
+			grid->tree().merge(threadGrids[i]->tree());
 		}
 
 		grids.push_back(grid);
@@ -212,6 +222,6 @@ void VQVAECodec::decompress(const std::filesystem::path& inPath, std::vector<ope
 	printf("\nMulti-Grid Decompression Complete in %lld ms.\n", decompress_ms);
 }
 
-torch::Tensor VQVAECodec::encodeBatch(const torch::Tensor& cpuBatch) const { return backend_->encode(cpuBatch); }
+Tensor VQVAECodec::encodeBatch(const TensorView& cpuBatch) const { return backend_->encode(cpuBatch); }
 
-torch::Tensor VQVAECodec::decodeBatch(const torch::Tensor& cpuBatch) const { return backend_->decode(cpuBatch); }
+Tensor VQVAECodec::decodeBatch(const TensorView& cpuBatch) const { return backend_->decode(cpuBatch); }
