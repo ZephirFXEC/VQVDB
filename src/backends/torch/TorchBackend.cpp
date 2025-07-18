@@ -14,7 +14,7 @@
 
 // Include the binary data for the embedded model.
 // This header should define g_model_data (unsigned char*) and g_model_data_size (size_t).
-#include "../Bin/bin_model.h"
+#include "bin/bin_model.h"
 
 namespace {
 
@@ -35,9 +35,6 @@ torch::jit::Module load_model(const ModelSource& source, const torch::Device& de
 	if (std::holds_alternative<EmbeddedModel>(source)) {
 		std::cout << "TorchBackend: Loading embedded model." << std::endl;
 
-		// *** THE FIX: Use std::stringstream ***
-		// This creates an in-memory stream that is fully seekable, which torch::jit::load requires.
-		// It involves one copy of the model data, which is acceptable for a one-time load.
 		std::stringstream model_stream;
 		model_stream.write(reinterpret_cast<const char*>(g_model_data), g_model_data_size);
 
@@ -71,9 +68,6 @@ torch::Device resolve_torch_device(const CodecConfig::Device device_enum) {
 }
 
 void configure_cpu_threads() {
-	// Note: This is a GLOBAL setting in libtorch. Calling this can affect
-	// other libtorch-using parts of the application. It's best to configure
-	// this once at application startup.
 	const int num_threads = std::max(1, (int)std::thread::hardware_concurrency() / 2);
 	torch::set_num_threads(num_threads);
 	std::cout << "TorchBackend: Set CPU threads to " << torch::get_num_threads() << std::endl;
@@ -81,18 +75,8 @@ void configure_cpu_threads() {
 
 }  // namespace
 
-// --- Factory Function Implementation ---
-std::unique_ptr<IVQVAECodec> IVQVAECodec::create(const CodecConfig& config) {
-	try {
-		return std::unique_ptr<IVQVAECodec>(new TorchBackend(config));
-	} catch (const std::exception& e) {
-		std::cerr << "Failed to create TorchBackend: " << e.what() << std::endl;
-		return nullptr;
-	}
-}
 
 // --- TorchBackend Implementation ---
-
 TorchBackend::TorchBackend(const CodecConfig& config)
     : device_(resolve_torch_device(config.device)),
       module_(load_model(config.source, device_)),
@@ -131,20 +115,76 @@ void TorchBackend::initialize_latent_shape() {
 }
 
 
-torch::Tensor TorchBackend::encode(const torch::Tensor& cpuBatch) const {
-	torch::NoGradGuard g;
-	// Move input tensor to the model's device, non-blocking for GPU transfers
-	torch::Tensor deviceBatch = cpuBatch.to(device_, /*non_blocking=*/true);
-	torch::IValue output = encodeMethod_({deviceBatch});
-	// Move result back to CPU and cast to uint8 as per the interface contract
-	return output.toTensor().to(torch::kCPU, torch::kUInt8);
+// Helper to convert our DataType enum to a torch::ScalarType
+static torch::ScalarType toTorchDType(DataType dtype) {
+	switch (dtype) {
+		case DataType::FLOAT32:
+			return torch::kFloat32;
+		case DataType::UINT8:
+			return torch::kUInt8;
+	}
+	throw std::runtime_error("Unsupported data type");
 }
 
-torch::Tensor TorchBackend::decode(const torch::Tensor& cpuIndices) const {
+Tensor TorchBackend::encode(const TensorView& leafBatch) const {
+	if (leafBatch.dtype != DataType::FLOAT32) {
+		throw std::runtime_error("encode expects FLOAT32 data.");
+	}
+
 	torch::NoGradGuard g;
-	// Indices must be long for embedding lookup; move to device
+
+	// 1. Create a non-owning torch::Tensor from the input TensorView.
+	//    This does not copy the data, it only wraps the existing memory.
+	auto options = torch::TensorOptions().dtype(toTorchDType(leafBatch.dtype)).device(torch::kCPU);
+
+	torch::Tensor cpuBatch = torch::from_blob(const_cast<void*>(leafBatch.data),  // from_blob needs a non-const ptr
+	                                          leafBatch.shape, options);
+
+	// 2. Run the original logic: move to device, execute, move back to CPU.
+	torch::Tensor deviceBatch = cpuBatch.to(device_, /*non_blocking=*/true);
+	torch::IValue output = encodeMethod_({deviceBatch});
+	torch::Tensor outputCpuTensor = output.toTensor().to(torch::kCPU, torch::kUInt8).contiguous();
+
+	// 3. Create an owning `Tensor` for the return value.
+	Tensor result;
+	result.shape = outputCpuTensor.sizes().vec();
+	result.dtype = DataType::UINT8;
+
+	// 4. Copy the data from the torch tensor into the result's owning buffer.
+	//    This is the primary source of overhead.
+	const size_t numBytes = outputCpuTensor.nbytes();
+	result.buffer.resize(numBytes);
+	std::memcpy(result.buffer.data(), outputCpuTensor.data_ptr(), numBytes);
+
+	return result;
+}
+
+Tensor TorchBackend::decode(const TensorView& indices) const {
+	if (indices.dtype != DataType::UINT8) {
+		throw std::runtime_error("decode expects UINT8 data.");
+	}
+
+	torch::NoGradGuard g;
+
+	// 1. Create a non-owning torch::Tensor from the input TensorView.
+	auto options = torch::TensorOptions().dtype(toTorchDType(indices.dtype)).device(torch::kCPU);
+
+	torch::Tensor cpuIndices = torch::from_blob(const_cast<void*>(indices.data), indices.shape, options);
+
+	// 2. Run the original logic: move to device, cast to Long for embedding, execute.
 	torch::Tensor deviceBatch = cpuIndices.to(device_, torch::kLong, /*non_blocking=*/true);
 	torch::IValue output = decodeMethod_({deviceBatch});
-	// Move result back to CPU and cast to float32 as per the interface contract
-	return output.toTensor().to(torch::kCPU, torch::kFloat32);
+	torch::Tensor outputCpuTensor = output.toTensor().to(torch::kCPU, torch::kFloat32).contiguous();
+
+	// 3. Create an owning `Tensor` for the return value.
+	Tensor result;
+	result.shape = outputCpuTensor.sizes().vec();
+	result.dtype = DataType::FLOAT32;
+
+	// 4. Copy the data from the torch tensor into the result's owning buffer.
+	const size_t numBytes = outputCpuTensor.nbytes();
+	result.buffer.resize(numBytes);
+	std::memcpy(result.buffer.data(), outputCpuTensor.data_ptr(), numBytes);
+
+	return result;
 }

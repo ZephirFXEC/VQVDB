@@ -7,11 +7,10 @@
 
 #include <UT/UT_Interrupt.h>
 #include <openvdb/openvdb.h>
-#include <torch/script.h>
 
 #include <filesystem>
 
-#include "Backend/IVQVAECodec.hpp"
+#include "../core/IVQVAECodec.hpp"
 
 /**
  * @class VQVAECodec
@@ -55,14 +54,14 @@ class VQVAECodec {
 	 * @param cpuBatch A pinned CPU tensor of shape [B, 1, D, D, D] with float32 data.
 	 * @return A CPU tensor of shape [B, H, W] (or similar) with uint8 quantized indices.
 	 */
-	[[nodiscard]] torch::Tensor encodeBatch(const torch::Tensor& cpuBatch) const;
+	[[nodiscard]] Tensor encodeBatch(const TensorView& cpuBatch) const;
 
 	/**
 	 * @brief Decodes a batch of quantized indices.
 	 * @param cpuBatch A CPU tensor of shape [B, H, W] (or similar) with uint8 quantized indices.
 	 * @return A CPU tensor of shape [B, 1, D, D, D] with float32 reconstructed data.
 	 */
-	[[nodiscard]] torch::Tensor decodeBatch(const torch::Tensor& cpuBatch) const;
+	[[nodiscard]] Tensor decodeBatch(const TensorView& cpuBatch) const;
 
 	std::unique_ptr<IVQVAECodec> backend_;
 };

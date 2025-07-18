@@ -1,7 +1,7 @@
 #pragma once
 
 #include <openvdb/Types.h>
-#include <torch/torch.h>
+#include "core/IVQVAECodec.hpp" // Include to get Tensor & TensorView
 
 #include <fstream>
 #include <string>
@@ -34,7 +34,7 @@ struct VQVDBFileHeader {
 #pragma pack(pop)
 
 struct EncodedBatch {
-	torch::Tensor data;
+	Tensor data; // Changed from torch::Tensor to our generic Tensor
 	std::vector<openvdb::Coord> origins;
 };
 
@@ -51,7 +51,7 @@ class VDBStreamWriter {
 	VDBStreamWriter& operator=(VDBStreamWriter&&) = delete;
 
 	void startGrid(const VQVDBMetadata& metadata);
-	void writeBatch(const torch::Tensor& encodedIndices, const std::vector<openvdb::Coord>& origins);
+	void writeBatch(const Tensor& encodedTensor, const std::vector<openvdb::Coord>& origins);
 	void endGrid();
 	void close();
 
