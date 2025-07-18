@@ -61,10 +61,10 @@ bool SOP_VQVDB_EncoderCache::initializeCodec() {
 
 	try {
 		CodecConfig config;
-		config.device = torch::cuda::is_available() ? CodecConfig::Device::CUDA : CodecConfig::Device::CPU;
+		config.device = CodecConfig::Device::CUDA;
 		config.source = EmbeddedModel{};
 
-		std::unique_ptr<IVQVAECodec> backend = IVQVAECodec::create(config, BackendType::LibTorch);
+		std::unique_ptr<IVQVAECodec> backend = IVQVAECodec::create(config, BackendType::ONNX);
 		if (!backend) {
 			return false;
 		}
