@@ -1,0 +1,13 @@
+{
+    "env": [
+        {
+            "VQVDB_PATH": "$HOUDINI_PACKAGE_PATH/.."
+        },
+        {
+            "HOUDINI_PATH": "$VQVDB_PATH"
+        },
+        {
+            "PATH": "$VQVDB_PATH/bin"
+        }
+    ]
+}
