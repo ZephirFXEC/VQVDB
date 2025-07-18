@@ -101,7 +101,7 @@ if %NO_VCPKG_INSTALL% equ 1 (
     call :LogInfo "Disabling automatic vcpkg package installation"
 )
 
-cmake -S . -B build -DRUN_TESTS=%RUNTESTS% -A="%ARCH%" -DVERSION=%VERSION% -DCMAKE_TOOLCHAIN_FILE=!CMAKE_TOOLCHAIN_FILE! !CMAKE_EXTRA!
+cmake -S . -B build -T v142 -DRUN_TESTS=%RUNTESTS% -A="%ARCH%" -DVERSION=%VERSION% -DCMAKE_TOOLCHAIN_FILE=!CMAKE_TOOLCHAIN_FILE! !CMAKE_EXTRA!
 
 if %errorlevel% neq 0 (
     call :LogError "Error caught during CMake configuration"
