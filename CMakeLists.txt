@@ -20,7 +20,10 @@ else ()
 endif ()
 
 add_library(HoudiniVDB INTERFACE)
-target_link_libraries(HoudiniVDB INTERFACE Houdini ${openvdb_lib} ${onnxruntime_lib})
+add_library(HoudiniONNX INTERFACE)
+target_link_libraries(HoudiniVDB INTERFACE Houdini ${openvdb_lib})
+target_link_libraries(HoudiniONNX INTERFACE Houdini ${onnxruntime_lib})
+
 target_include_directories(HoudiniVDB INTERFACE "$ENV{HFS}/toolkit/include")
 
 if (MSVC)
@@ -88,13 +91,17 @@ if (ENABLE_ONNX_BACKEND)
     find_package(CUDAToolkit REQUIRED)
 
     add_library(vqvdb_backend_onnx STATIC
-            src/backends/onnx/OnnxBackend.cpp
-            src/backends/onnx/OnnxBackend.hpp
+            src/backends/onnx/OnnxBackendFactory.cpp
+            src/backends/onnx/OnnxBackendFactory.hpp
+            src/backends/onnx/OnnxBackend_CPU.cpp
+            src/backends/onnx/OnnxBackend_CPU.hpp
+            src/backends/onnx/OnnxBackend_Cuda.cpp
+            src/backends/onnx/OnnxBackend_Cuda.hpp
     )
     # Link against HoudiniVDB. This provides the include paths for onnxruntime
     # headers AND transitively links the necessary onnxruntime library.
     target_link_libraries(vqvdb_backend_onnx
-            PUBLIC vqvdb_core HoudiniVDB CUDA::cudart
+            PUBLIC vqvdb_core HoudiniONNX CUDA::cudart
     )
     # NO MORE manual linking or DLL copying needed.
     list(APPEND ENABLED_BACKEND_TARGETS vqvdb_backend_onnx)

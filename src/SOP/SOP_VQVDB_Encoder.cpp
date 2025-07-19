@@ -131,8 +131,7 @@ void SOP_VQVDB_EncoderVerb::cook(const CookParms& cookparms) const {
 		// --- Run Encoder ---
 		cookparms.sopAddMessage(SOP_MESSAGE, "Starting VQ-VDB encoding...");
 
-		UT_Interrupt boss("Compressing...");
-		sopcache->codec_->compress(float_grids, out_path, batch_size, &boss);
+		sopcache->codec_->compress(float_grids, out_path, batch_size);
 
 		cookparms.sopAddMessage(SOP_MESSAGE, ("Successfully saved to " + out_path.string()).c_str());
 

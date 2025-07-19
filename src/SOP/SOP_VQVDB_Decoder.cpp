@@ -96,14 +96,8 @@ void SOP_VQVDB_DecoderVerb::cook(const CookParms& cookparms) const {
 	try {
 		cookparms.sopAddMessage(SOP_MESSAGE, "Starting VQ-VDB decoding...");
 
-		// Get the interrupt handler for progress updates and cancellation.
-		UT_Interrupt boss("Decompressing...");
-		boss.setEnabled(1);  // Enable progress and cancellation.
-
 		// Call the decompress method.
-		sopcache->codec_->decompress(in_path, output_grids, sopparms.getBatchsize(), &boss);
-
-		boss.setEnabled(0);
+		sopcache->codec_->decompress(in_path, output_grids, sopparms.getBatchsize());
 
 	} catch (const std::exception& e) {
 		cookparms.sopAddError(SOP_MESSAGE, e.what());
