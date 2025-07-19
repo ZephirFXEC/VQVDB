@@ -1,66 +1,71 @@
 pipeline {
-    agent any          // the Jenkins master is “localhost” on Windows
-
+    agent any
     options {
-        buildDiscarder(logRotator(numToKeepStr: '5'))
+        buildDiscarder logRotator(numToKeepStr: '5')
         timestamps()
     }
 
     environment {
-        // Where we will collect the final artefacts
-        RELEASE_DIR  = "${env.WORKSPACE}/release"
-        // Make sure the script is executable (Jenkins will run it via cmd)
-        BUILD_SCRIPT = "${env.WORKSPACE}/build.bat"
+        // where the artefacts will be collected
+        RELEASE_DIR   = "${WORKSPACE}\\release"
+
+        // LibTorch will be unpacked to WORKSPACE\libtorch
+        TORCH_URL     = 'https://download.pytorch.org/libtorch/cu118/libtorch-win-shared-with-deps-2.1.2%2Bcu118.zip'
+        TORCH_ZIP     = 'libtorch.zip'
     }
 
     stages {
 
-        /* -----------------------------------------------------------
-           1.  Preparation – clone the repo and wipe any stale state
-        ----------------------------------------------------------- */
+        /* 1. Clone the repo and wipe any leftovers */
         stage('Preparation') {
             steps {
-                script {
-                    deleteDir()      // clean workspace
-                }
+                deleteDir()
                 checkout scm
             }
         }
 
-        /* -----------------------------------------------------------
-           2.  Build – configure CMake & generate project files
-        ----------------------------------------------------------- */
+        /* 2. Download & unpack LibTorch ONLY if missing */
+        stage('Download LibTorch') {
+            steps {
+                script {
+                    if (!fileExists('libtorch\\share\\cmake\\Torch\\TorchConfig.cmake')) {
+                        bat """
+                            echo *** Downloading LibTorch ...
+                            curl -L -o "${TORCH_ZIP}" "${TORCH_URL}"
+                            powershell -NoP -Command "Expand-Archive -Path ${TORCH_ZIP} -DestinationPath . -Force"
+                            REM the archive contains a top-level 'libtorch' folder
+                        """
+                    } else {
+                        echo "*** LibTorch already present – skipping download."
+                    }
+                }
+            }
+        }
+
+        /* 3. Build (CMake configure) */
         stage('Build') {
             steps {
-                bat "${BUILD_SCRIPT} --clean --reldebug"
+                bat 'call build.bat --clean --reldebug'
             }
         }
 
-        /* -----------------------------------------------------------
-           3.  Compile – actually compile the code (+ optional tests)
-        ----------------------------------------------------------- */
+        /* 4. Compile (build + tests + install) */
         stage('Compile') {
             steps {
-                bat "${BUILD_SCRIPT} --install --installdir:${RELEASE_DIR}"
+                bat "call build.bat --reldebug --tests --install --installdir:\"${RELEASE_DIR}\""
             }
         }
 
-        /* -----------------------------------------------------------
-           4.  Release – archive artefacts so Jenkins keeps them
-        ----------------------------------------------------------- */
+        /* 5. Archive artefacts */
         stage('Release') {
             steps {
-                archiveArtifacts artifacts: "${RELEASE_DIR}/**/*", fingerprint: true
+                archiveArtifacts artifacts: "${RELEASE_DIR}\\**\\*", fingerprint: true
             }
         }
     }
 
     post {
-        always {
-            echo "Pipeline finished – see artefacts in ${RELEASE_DIR}"
-        }
-        failure {
-            echo "Something went wrong – inspect the console log above"
-        }
+        always  { echo 'Pipeline finished – see artefacts above' }
+        failure { echo 'Pipeline failed – inspect console log' }
     }
 }
