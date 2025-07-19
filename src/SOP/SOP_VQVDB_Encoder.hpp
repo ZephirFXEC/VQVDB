@@ -10,6 +10,7 @@
 
 #include "../orchestrator/VQVAECodec.hpp"
 #include "SOP_VQVDB_Encoder.proto.h"
+
 class SOP_VQVDB_Encoder final : public SOP_Node {
    public:
 	SOP_VQVDB_Encoder(OP_Network* net, const char* name, OP_Operator* op) : SOP_Node(net, name, op) {}
