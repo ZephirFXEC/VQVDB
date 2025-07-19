@@ -65,7 +65,12 @@ std::pair<std::vector<Ort::AllocatedStringPtr>, std::vector<const char*>> getOut
 	return {std::move(namePtrs), std::move(names)};
 }
 
-OnnxBackendFactory::OnnxBackendFactory() : env_(ORT_LOGGING_LEVEL_INFO, "VQVAECodec") {}
+extern "C" void ORT_API_CALL onnxConsoleLogger(void*, OrtLoggingLevel /*severity*/, const char* /*category*/, const char* /*logid*/,
+                                               const char* /*code_location*/, const char* message) {
+	std::cout << "[ORT] " << message << std::endl;
+}
+
+OnnxBackendFactory::OnnxBackendFactory() : env_(ORT_LOGGING_LEVEL_WARNING, "VQVAECodec", onnxConsoleLogger, nullptr) {}
 
 void OnnxBackendFactory::init(const CodecConfig& config) {
 	sessionOptions_.SetIntraOpNumThreads(std::max(1, (int)std::thread::hardware_concurrency() / 2));

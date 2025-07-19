@@ -3,21 +3,25 @@
 #include <iostream>
 #include <stdexcept>
 
-OnnxCudaBackend::OnnxCudaBackend(const CodecConfig& config) { init(config); }
+OnnxCudaBackend::OnnxCudaBackend(const CodecConfig& config) {
+	std::cout << "OnnxCudaBackend: Initialising …" << std::endl;
+	init(config);
+}
 
 void OnnxCudaBackend::configure_execution_provider() {
-	try {
-		OrtCUDAProviderOptions cuda_options{};
-		cuda_options.device_id = 0;
-		cuda_options.arena_extend_strategy = 1;
-		cuda_options.gpu_mem_limit = SIZE_MAX;
-		cuda_options.cudnn_conv_algo_search = OrtCudnnConvAlgoSearchDefault;
-		cuda_options.do_copy_in_default_stream = 1;
+	OrtCUDAProviderOptions cuda_options{};
+	cuda_options.device_id = 0;
+	cuda_options.arena_extend_strategy = 1;
+	cuda_options.gpu_mem_limit = SIZE_MAX;
+	cuda_options.cudnn_conv_algo_search = OrtCudnnConvAlgoSearchHeuristic;
+	cuda_options.do_copy_in_default_stream = 1;
 
+	try {
 		sessionOptions_.AppendExecutionProvider_CUDA(cuda_options);
 		std::cout << "OnnxCudaBackend: CUDA execution provider enabled." << std::endl;
 	} catch (const std::exception& e) {
-		std::cerr << "OnnxCudaBackend: Failed to configure CUDA execution provider: " << e.what() << std::endl;
+		std::cerr << "OnnxCudaBackend: FATAL – could not enable CUDA: " << e.what() << std::endl;
+		throw;
 	}
 }
 
