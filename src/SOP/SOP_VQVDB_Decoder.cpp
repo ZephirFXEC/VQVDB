@@ -55,8 +55,7 @@ bool SOP_VQVDB_DecoderCache::initializeCodec() {
 	try {
 		CodecConfig config;
 		config.device = CodecConfig::Device::CUDA;
-		config.source = OnnxModelPaths{"C:/Users/zphrfx/Desktop/hdk/VQVDB/models/onnx_models/encoder.onnx",
-		                               "C:/Users/zphrfx/Desktop/hdk/VQVDB/models/onnx_models/decoder.onnx"};
+		config.source = EmbeddedModel{};
 
 		std::unique_ptr<IVQVAECodec> backend = IVQVAECodec::create(config, BackendType::ONNX);
 		if (!backend) {

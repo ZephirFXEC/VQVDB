@@ -5,6 +5,8 @@
 #include <stdexcept>
 #include <thread>
 
+#include "Bin/bin_onnx.h"
+
 ONNXTensorElementDataType OnnxBackendFactory::toOnnxDataType(DataType dtype) {
 	switch (dtype) {
 		case DataType::FLOAT32:
@@ -86,6 +88,10 @@ void OnnxBackendFactory::setup_sessions(const ModelSource& source) {
 	std::vector<uint8_t> encoderData, decoderData;
 
 	if (std::holds_alternative<EmbeddedModel>(source)) {
+		std::cout << "Loading embedded models." << std::endl;
+		const auto& embedded = std::get<EmbeddedModel>(source);
+		encoderData = std::vector<uint8_t>(encoder_model_data, encoder_model_data + encoder_model_data_size);
+		decoderData = std::vector<uint8_t>(decoder_model_data, decoder_model_data + decoder_model_data_size);
 	} else if (std::holds_alternative<OnnxModelPaths>(source)) {
 		const auto& paths = std::get<OnnxModelPaths>(source);
 		std::cout << "Loading models from paths:\n  Encoder: " << paths.encoder_path << "\n  Decoder: " << paths.decoder_path << std::endl;
