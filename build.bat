@@ -14,9 +14,12 @@ set INSTALL=0
 set INSTALLDIR=%CD%\install
 set "HOUPATH="
 
-for %%x in (%*) do (
-    call :ParseArg %%~x
-)
+:ArgLoop
+if "%~1"=="" goto EndOfArgs
+call :ParseArg %1
+shift
+goto ArgLoop
+:EndOfArgs
 
 if %HELP% equ 1 (
     echo VQVDB build script for Windows
@@ -129,16 +132,18 @@ if "%~1" equ "--export-compile-commands" (
     call :LogWarning "Exporting compile commands is not supported on Windows for now"
 )
 
-echo "%~1" | find /I "version">nul && (
-    call :ParseVersion %~1
+rem The find command needs to search inside the argument, which may have quotes.
+rem %1 contains the full, possibly quoted argument.
+echo %1 | find /I "version" >nul && (
+    call :ParseVersion "%~1"
 )
 
-echo "%~1" | find /I "installdir">nul && (
-    call :ParseInstallDir %~1
+echo %1 | find /I "installdir" >nul && (
+    call :ParseInstallDir "%~1"
 )
 
-echo "%~1" | find /I "houdinipath">nul && (
-    call :ParseHoudiniPath %~1
+echo %1 | find /I "houdinipath" >nul && (
+    call :ParseHoudiniPath "%~1"
 )
 
 exit /B 0
