@@ -61,8 +61,19 @@ set(ENABLED_BACKEND_DEFINITIONS "")
 # ----- LibTorch Backend ----------------------------------------------------
 if (ENABLE_TORCH_BACKEND)
     message(STATUS "Building Torch backend")
-    list(APPEND CMAKE_PREFIX_PATH "libtorch")
+    list(APPEND CMAKE_PREFIX_PATH "${CMAKE_CURRENT_SOURCE_DIR}/libtorch")
+    set(NVTX3_INCLUDE_DIR "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.6/include/nvtx3")
+    include_directories(${NVTX3_INCLUDE_DIR})
+
+    LIST(APPEND CUDA_NVCC_FLAGS ${ARCH_FLAGS})
+
     find_package(Torch REQUIRED)
+
+    if (NOT TARGET CUDA::nvToolsExt)
+        add_library(nvtx3_dummy INTERFACE)
+        target_include_directories(nvtx3_dummy INTERFACE "${NVTX3_INCLUDE_DIR}")
+        add_library(CUDA::nvToolsExt ALIAS nvtx3_dummy)
+    endif ()
 
     add_library(vqvdb_backend_torch STATIC
             src/backends/torch/TorchBackend.cpp

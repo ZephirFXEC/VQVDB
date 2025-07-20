@@ -1,3 +1,6 @@
 build
 install
 vcpkg
+data
+cmake-build-release
+.venv

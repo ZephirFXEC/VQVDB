@@ -36,7 +36,8 @@ if %HELP% equ 1 (
     exit /B 0
 )
 
-call :LogInfo "Building VQVDB"
+call :LogInfo "Building VQVDB..."
+
 
 if %REMOVEOLDDIR% equ 1 (
     if exist build (
