@@ -43,25 +43,14 @@ pipeline {
 
         /* 3. Build (CMake configure) */
 		stage('Build') {
-					steps {
-						bat """
-					REM -- pick one CUDA install and hide the rest
-					set CUDA_PATH=C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.6
-					set CUDA_PATH_V12_6=%CUDA_PATH%
-					set "PATH=%CUDA_PATH%\\bin;%PATH%"
-					set "INCLUDE="
-					set "LIB="
-
-					REM -- load the VC++ environment
-					call "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvars64.bat"
-
-					REM -- now your script sees the same ENV you see at the console
-					call build.bat --clean --reldebug
+			steps {
+				bat """
+					call build.bat --clean
 				"""
 			}
 		}
 
-        /* 4. Compile (build + tests + install) */
+        /* 4. Compile (build + install) */
         stage('Compile') {
 			steps {
 				bat "call build.bat --install --installdir:\"${RELEASE_DIR}\""
