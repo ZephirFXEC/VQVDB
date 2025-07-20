@@ -1,14 +1,13 @@
 cmake_minimum_required(VERSION 3.28)
-project(VQVDB LANGUAGES CXX) # CUDA language is not needed at the top-level
+project(VQVDB LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # ─────────── Build options ─────────────────────────────────────────────────
-option(ENABLE_TORCH_BACKEND "Build the LibTorch backend" ON)
-option(ENABLE_ONNX_BACKEND "Build the ONNXRuntime backend" OFF)
+option(ENABLE_TORCH_BACKEND "Build the LibTorch backend" OFF)
+option(ENABLE_ONNX_BACKEND "Build the ONNXRuntime backend" ON)
 
 # ─────────── Houdini / OpenVDB ─────────────────────────────────────────────
-# This section is well-structured and remains unchanged.
 list(APPEND CMAKE_PREFIX_PATH "$ENV{HFS}/toolkit/cmake")
 find_package(Houdini REQUIRED)
 
@@ -16,23 +15,21 @@ if (UNIX)
     set(openvdb_lib "$ENV{HFS}/dsolib/libopenvdb_sesi.so")
 else ()
     set(openvdb_lib "$ENV{HFS}/custom/houdini/dsolib/openvdb_sesi.lib")
+    set(onnxruntime_lib "$ENV{HFS}/custom/houdini/dsolib/onnxruntime.lib")
 endif ()
 
 add_library(HoudiniVDB INTERFACE)
 target_link_libraries(HoudiniVDB INTERFACE Houdini ${openvdb_lib})
+
 target_include_directories(HoudiniVDB INTERFACE "$ENV{HFS}/toolkit/include")
 
-if (MSVC)
-    add_compile_options(/O2 /Gy /Zc:inline)
-    add_link_options(/OPT:REF /OPT:ICF /INCREMENTAL:NO)
-endif ()
+add_compile_options(${_houdini_compile_options})
 
 # ─────────── 1. CORE INTERFACE (Header-only) ───────────────────────────────
 # Defines the IVQVAECodec interface. No .cpp files, no ML dependencies.
 # ---------------------------------------------------------------------------
-
 add_library(vqvdb_core INTERFACE)
-target_include_directories(vqvdb_core INTERFACE "src") # Allows #include "VQVDB/Backend/IVQVAECodec.hpp"
+target_include_directories(vqvdb_core INTERFACE "src")
 
 # ─────────── 2. ORCHESTRATOR LIBRARY ───────────────────────────────────────
 # The high-level VQVAECodec logic. Depends on the core interface, not on any
@@ -95,18 +92,22 @@ endif ()
 # ----- ONNX Backend --------------------------------------------------------
 if (ENABLE_ONNX_BACKEND)
     message(STATUS "Building ONNX backend (using Houdini's runtime)")
+    find_package(CUDAToolkit REQUIRED)
 
     add_library(vqvdb_backend_onnx STATIC
-            src/backends/onnx/OnnxBackend.cpp
-            src/backends/onnx/OnnxBackend.hpp
+            src/backends/onnx/OnnxBackendFactory.cpp
+            src/backends/onnx/OnnxBackendFactory.hpp
+            src/backends/onnx/OnnxBackend_CPU.cpp
+            src/backends/onnx/OnnxBackend_CPU.hpp
+            src/backends/onnx/OnnxBackend_Cuda.cpp
+            src/backends/onnx/OnnxBackend_Cuda.hpp
     )
-    # Link against HoudiniVDB. This provides the include paths for onnxruntime
-    # headers AND transitively links the necessary onnxruntime library.
+    # Link against HoudiniV. This provides the include paths for onnxruntime
+    # headers AND links the necessary onnxruntime library.
     target_link_libraries(vqvdb_backend_onnx
-            PUBLIC vqvdb_core
-            PRIVATE HoudiniVDB
+            PUBLIC vqvdb_core Houdini CUDA::cudart ${onnxruntime_lib}
     )
-    # NO MORE manual linking or DLL copying needed.
+
     list(APPEND ENABLED_BACKEND_TARGETS vqvdb_backend_onnx)
     list(APPEND ENABLED_BACKEND_DEFINITIONS "ENABLE_ONNX_BACKEND")
 endif ()

@@ -22,7 +22,12 @@ enum class BackendType { LibTorch, ONNX };
  * @brief Specifies the source for loading the VQ-VAE model.
  */
 struct EmbeddedModel {};  // Tag for using the embedded model
-using ModelSource = std::variant<EmbeddedModel, std::filesystem::path>;
+struct OnnxModelPaths {
+	std::filesystem::path encoder_path;
+	std::filesystem::path decoder_path;
+};
+
+using ModelSource = std::variant<EmbeddedModel, std::filesystem::path, OnnxModelPaths>;
 
 /**
  * @brief Generic data types for tensor elements.

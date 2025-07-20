@@ -3,7 +3,6 @@
 #include <GU/GU_Detail.h>
 #include <UT/UT_DSOVersion.h>
 
-#include "../backends/torch/TorchBackend.hpp"
 #include "../orchestrator/VQVAECodec.hpp"
 #include "Utils/Utils.hpp"
 
@@ -61,10 +60,10 @@ bool SOP_VQVDB_EncoderCache::initializeCodec() {
 
 	try {
 		CodecConfig config;
-		config.device = torch::cuda::is_available() ? CodecConfig::Device::CUDA : CodecConfig::Device::CPU;
+		config.device = CodecConfig::Device::CUDA;
 		config.source = EmbeddedModel{};
 
-		std::unique_ptr<IVQVAECodec> backend = IVQVAECodec::create(config, BackendType::LibTorch);
+		std::unique_ptr<IVQVAECodec> backend = IVQVAECodec::create(config, BackendType::ONNX);
 		if (!backend) {
 			return false;
 		}
@@ -131,8 +130,7 @@ void SOP_VQVDB_EncoderVerb::cook(const CookParms& cookparms) const {
 		// --- Run Encoder ---
 		cookparms.sopAddMessage(SOP_MESSAGE, "Starting VQ-VDB encoding...");
 
-		UT_Interrupt boss("Compressing...");
-		sopcache->codec_->compress(float_grids, out_path, batch_size, &boss);
+		sopcache->codec_->compress(float_grids, out_path, batch_size);
 
 		cookparms.sopAddMessage(SOP_MESSAGE, ("Successfully saved to " + out_path.string()).c_str());
 

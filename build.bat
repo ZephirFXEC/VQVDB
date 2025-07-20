@@ -38,19 +38,6 @@ if %HELP% equ 1 (
 
 call :LogInfo "Building VQVDB..."
 
-call :LogInfo "Current directory: %CD%"
-
-call :LogInfo "Finding Libtorch..."
-if not defined LIBTORCH_ROOT (
-    if exist "%CD%/libtorch" (
-        set LIBTORCH_ROOT=%CD%/libtorch
-        call :LogInfo "Using libtorch from current directory"
-    ) else (
-        call :LogError "libtorch not found in the current directory, please set LIBTORCH_ROOT environment variable or place libtorch in the current directory"
-        call :LogError "You can download it from https://pytorch.org/get-started/locally/"
-        exit /B 1
-    )
-)
 
 if %REMOVEOLDDIR% equ 1 (
     if exist build (
@@ -77,6 +64,7 @@ if not defined HOUPATH (
 
 call :LogInfo "Build type: %BUILDTYPE%"
 call :LogInfo "Build version: %VERSION%"
+
 
 cmake -S . -B build -T v142 -DRUN_TESTS=%RUNTESTS% -A="%ARCH%" -DVERSION=%VERSION%
 

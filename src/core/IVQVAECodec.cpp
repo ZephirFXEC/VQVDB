@@ -13,11 +13,10 @@
 #endif
 
 #ifdef ENABLE_ONNX_BACKEND
-#include "backends/onnx/OnnxBackend.hpp"
+#include "backends/onnx/OnnxBackend_CPU.hpp"
+#include "backends/onnx/OnnxBackend_Cuda.hpp"
 #endif
 
-
-// The factory implementation with an explicit choice
 std::unique_ptr<IVQVAECodec> IVQVAECodec::create(const CodecConfig& config, BackendType type) {
 	try {
 		switch (type) {
@@ -27,12 +26,22 @@ std::unique_ptr<IVQVAECodec> IVQVAECodec::create(const CodecConfig& config, Back
 #endif
 
 #ifdef ENABLE_ONNX_BACKEND
-			case BackendType::ONNX:
-				return std::unique_ptr<IVQVAECodec>(new OnnxBackend(config));
-#endif
+			case BackendType::ONNX: {
+				switch (config.device) {
+					case CodecConfig::Device::CPU:
+						return std::make_unique<OnnxCpuBackend>(config);
+					case CodecConfig::Device::CUDA:
+						return std::make_unique<OnnxCudaBackend>(config);
 
+					default:
+						throw std::runtime_error("Unsupported device for ONNX backend: " + std::to_string(static_cast<int>(config.device)));
+				}
+			}
+#endif
 			default:
-				throw std::runtime_error("Requested backend type is not available or disabled in the build configuration.");
+				throw std::runtime_error(
+				    "Requested backend type is not available or disabled in the "
+				    "build configuration.");
 		}
 	} catch (const std::exception& e) {
 		std::cerr << "Failed to create VQ-VAE backend: " << e.what() << std::endl;

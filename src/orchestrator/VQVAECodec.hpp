@@ -5,12 +5,11 @@
 
 #pragma once
 
-#include <UT/UT_Interrupt.h>
 #include <openvdb/openvdb.h>
 
 #include <filesystem>
 
-#include "../core/IVQVAECodec.hpp"
+#include "core/IVQVAECodec.hpp"
 
 /**
  * @class VQVAECodec
@@ -35,8 +34,7 @@ class VQVAECodec {
 	 * @param batchSize The number of leaf blocks to process in a single batch.
 	 * @param boss A pointer to Houdini's interrupt handler for progress and cancellation. Can be nullptr.
 	 */
-	void compress(const std::vector<openvdb::FloatGrid::Ptr>& grids, const std::filesystem::path& outPath, size_t batchSize,
-	              UT_Interrupt* boss) const;
+	void compress(const std::vector<openvdb::FloatGrid::Ptr>& grids, const std::filesystem::path& outPath, size_t batchSize) const;
 
 	/**
 	 * @brief Decompresses a .vqvdb file into OpenVDB FloatGrids.
@@ -45,8 +43,7 @@ class VQVAECodec {
 	 * @param batchSize The number of leaf blocks to process in a single batch.
 	 * @param boss A pointer to Houdini's interrupt handler for progress and cancellation. Can be nullptr.
 	 */
-	void decompress(const std::filesystem::path& inPath, std::vector<openvdb::FloatGrid::Ptr>& grids, size_t batchSize,
-	                UT_Interrupt* boss) const;
+	void decompress(const std::filesystem::path& inPath, std::vector<openvdb::FloatGrid::Ptr>& grids, size_t batchSize) const;
 
    private:
 	/**

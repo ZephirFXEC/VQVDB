@@ -3,7 +3,6 @@
 #include <GU/GU_Detail.h>
 #include <UT/UT_DSOVersion.h>
 
-#include "../backends/torch/TorchBackend.hpp"
 #include "../orchestrator/VQVAECodec.hpp"
 #include "Utils/Utils.hpp"
 
@@ -50,28 +49,22 @@ const SOP_NodeVerb* SOP_VQVDB_Decoder::cookVerb() const { return SOP_VQVDB_Decod
 
 bool SOP_VQVDB_DecoderCache::initializeCodec() {
 	if (codec_) {
-		return true;  // Already initialized
+		return true;
 	}
 
 	try {
-		// 1. Create a configuration for the backend.
-		//    This could be expanded to read from SOP parameters (e.g., a "Device" menu).
 		CodecConfig config;
-		config.device = torch::cuda::is_available() ? CodecConfig::Device::CUDA : CodecConfig::Device::CPU;
-		config.source = EmbeddedModel{};  // Use the embedded model
+		config.device = CodecConfig::Device::CUDA;
+		config.source = EmbeddedModel{};
 
-		// 2. Use the factory to create the backend.
-		std::unique_ptr<IVQVAECodec> backend = IVQVAECodec::create(config, BackendType::LibTorch);
+		std::unique_ptr<IVQVAECodec> backend = IVQVAECodec::create(config, BackendType::ONNX);
 		if (!backend) {
-			// The factory will have printed an error. We just need to fail.
 			return false;
 		}
 
-		// 3. Create the high-level VQVAECodec, giving it ownership of the backend.
 		codec_ = std::make_unique<VQVAECodec>(std::move(backend));
 
 	} catch (const std::exception& e) {
-		// Catch potential errors from std::make_unique or the VQVAECodec constructor.
 		std::cerr << "Caught exception during codec initialization: " << e.what() << std::endl;
 		codec_.reset();
 		return false;
@@ -102,14 +95,8 @@ void SOP_VQVDB_DecoderVerb::cook(const CookParms& cookparms) const {
 	try {
 		cookparms.sopAddMessage(SOP_MESSAGE, "Starting VQ-VDB decoding...");
 
-		// Get the interrupt handler for progress updates and cancellation.
-		UT_Interrupt boss("Decompressing...");
-		boss.setEnabled(1);  // Enable progress and cancellation.
-
 		// Call the decompress method.
-		sopcache->codec_->decompress(in_path, output_grids, sopparms.getBatchsize(), &boss);
-
-		boss.setEnabled(0);
+		sopcache->codec_->decompress(in_path, output_grids, sopparms.getBatchsize());
 
 	} catch (const std::exception& e) {
 		cookparms.sopAddError(SOP_MESSAGE, e.what());
