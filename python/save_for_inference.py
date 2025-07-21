@@ -1,12 +1,13 @@
-from typing import Tuple, List
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from VQVAE_v2 import EncoderFloat, DecoderFloat, ResidualBlock, ChannelAttention
+from VQVAE_v2 import EncoderFloat, DecoderFloat
+
 
 class InferenceEncoder(nn.Module):
     """A lean encoder for inference. Structurally identical to the training Encoder."""
+
     def __init__(self, in_channels: int, embedding_dim: int):
         super().__init__()
         # The structure MUST be identical to the training Encoder to load weights.
@@ -26,6 +27,7 @@ class InferenceEncoder(nn.Module):
 
 class InferenceDecoder(nn.Module):
     """A lean decoder for inference."""
+
     def __init__(self, embedding_dim: int, out_channels: int):
         super().__init__()
         self.net = nn.Sequential(
@@ -38,6 +40,7 @@ class InferenceDecoder(nn.Module):
             nn.Conv3d(32, out_channels, kernel_size=3, stride=1, padding=1),
             nn.Sigmoid(),
         )
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
 
@@ -51,9 +54,9 @@ class InferenceVectorQuantizer(nn.Module):
 
     def get_indices(self, flat_x: torch.Tensor) -> torch.Tensor:
         distances = (
-            torch.sum(flat_x ** 2, dim=1, keepdim=True)
-            + torch.sum(self.embedding ** 2, dim=1)
-            - 2 * torch.matmul(flat_x, self.embedding.t())
+                torch.sum(flat_x ** 2, dim=1, keepdim=True)
+                + torch.sum(self.embedding ** 2, dim=1)
+                - 2 * torch.matmul(flat_x, self.embedding.t())
         )
         return torch.argmin(distances, dim=1)
 
@@ -71,7 +74,7 @@ class InferenceVQVAE(nn.Module):
 
     @torch.jit.export
     def encode(self, x: torch.Tensor) -> torch.Tensor:
-        z = self.encoder(x) # Shape: [B, embedding_dim, 4, 4, 4]
+        z = self.encoder(x)  # Shape: [B, embedding_dim, 4, 4, 4]
 
         # Permute channels to be the last dimension: [B, 4, 4, 4, embedding_dim]
         z_permuted = z.permute(0, 2, 3, 4, 1)
@@ -102,13 +105,13 @@ class InferenceVQVAE(nn.Module):
 
 
 IN_CHANNELS = 1
-EMBEDDING_DIM = 128 
-NUM_EMBEDDINGS = 256 
+EMBEDDING_DIM = 128
+NUM_EMBEDDINGS = 256
 COMMITMENT_COST = 0.25
 torch.backends.cudnn.benchmark = True
 
-def main():
 
+def main():
     # Load the state dict from your trained model.
     trained_state_dict = torch.load('models/scalar/vqvae_128_256_singlechannel_residual.pth', map_location='cpu')
 
@@ -121,7 +124,6 @@ def main():
     # - quantizer.embedding matches InferenceVectorQuantizer.embedding
     inference_model.load_state_dict(trained_state_dict, strict=False)
     print("Successfully loaded weights into the inference model.")
-
 
     # CRITICAL: Prepare the model for inference and JIT scripting.
     inference_model.to("cuda")
@@ -141,7 +143,7 @@ def main():
     print("\nTesting the scripted model...")
     with torch.no_grad():
         dummy_input = torch.randn(4, IN_CHANNELS, 8, 8, 8).to("cuda")
-        
+
         indices = scripted_inference_model.encode(dummy_input)
         reconstruction = scripted_inference_model.decode(indices)
 

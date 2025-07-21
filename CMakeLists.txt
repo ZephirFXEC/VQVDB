@@ -209,15 +209,12 @@ install(CODE [[
     endforeach()
 ]])
 
-# Check which cuda dlls are really needed, for now we copy everything
 file(GLOB CUDA_DLLS
         LIST_DIRECTORIES FALSE
-        #      "${CUDAToolkit_BIN_DIR}/cusparse*.dll"
-        "${CUDAToolkit_BIN_DIR}/*.dll"
-        #      "${CUDAToolkit_BIN_DIR}/cublas*.dll"
-        #      "${CUDAToolkit_BIN_DIR}/cudnn*.dll"
-        #      "${CUDAToolkit_BIN_DIR}/cufft*.dll"
-        #      "${CUDAToolkit_BIN_DIR}/cusolver*.dll"
+        "${CUDAToolkit_BIN_DIR}/cublas64_12.dll"
+        "${CUDAToolkit_BIN_DIR}/cublasLt64_12.dll"
+        "${CUDAToolkit_BIN_DIR}/cufft64_11.dll"
+        "C:/Program Files/NVIDIA/CUDNN/v8.9.2/bin/cudnn64_8.dll" # Houdini 20.5 uses cuDNN 8 :')
 )
 
 install(FILES ${CUDA_DLLS}

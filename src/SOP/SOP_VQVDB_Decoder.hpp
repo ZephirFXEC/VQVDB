@@ -1,6 +1,10 @@
-//
-// Created by zphrfx on 22/06/2025.
-//
+/*
+ * Copyright (c) 2025, Enzo Crema
+ *
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * See the LICENSE file in the project root for full license text.
+ */
 
 #pragma once
 
@@ -12,7 +16,7 @@
 #include "SOP_VQVDB_Decoder.proto.h"
 
 class SOP_VQVDB_Decoder final : public SOP_Node {
-public:
+   public:
 	SOP_VQVDB_Decoder(OP_Network* net, const char* name, OP_Operator* op) : SOP_Node(net, name, op) {}
 
 	~SOP_VQVDB_Decoder() override = default;
@@ -37,7 +41,7 @@ public:
 };
 
 class SOP_VQVDB_DecoderCache final : public SOP_NodeCache {
-public:
+   public:
 	SOP_VQVDB_DecoderCache() : SOP_NodeCache() {}
 	~SOP_VQVDB_DecoderCache() override = default;
 
@@ -46,7 +50,7 @@ public:
 };
 
 class SOP_VQVDB_DecoderVerb final : public SOP_NodeVerb {
-public:
+   public:
 	SOP_VQVDB_DecoderVerb() = default;
 	~SOP_VQVDB_DecoderVerb() override = default;
 	[[nodiscard]] SOP_NodeParms* allocParms() const override { return new SOP_VQVDB_DecoderParms; }

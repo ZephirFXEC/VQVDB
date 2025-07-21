@@ -1,7 +1,11 @@
-import argparse
-import os
-import struct
-import time
+"""
+ Copyright (c) 2025, Enzo Crema
+
+ SPDX-License-Identifier: BSD-3-Clause
+
+ See the LICENSE file in the project root for full license text.
+"""
+
 from pathlib import Path
 from typing import List, Optional, Callable, Sequence, Tuple
 
@@ -9,11 +13,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.optim import Adam
-from torch.utils.data import Dataset, DataLoader
-from tqdm import tqdm
-import matplotlib.pyplot as plt
-import einops 
+from torch.utils.data import Dataset
+
 LEAF_DIM = 8
 
 
@@ -33,7 +34,7 @@ class VDBLeafDataset(Dataset):
         self.include_origins = include_origins
         self.buffer = torch.empty(0)  # Pre-allocate later
         self.in_channels = in_channels
-        
+
         # Precompute offsets and mmap files
         self.arrays = []
         self.origin_arrays = [] if include_origins else None
@@ -75,15 +76,14 @@ class VDBLeafDataset(Dataset):
         else:
             leaf = leaf.permute(3, 0, 1, 2)  # (C, 8, 8, 8)
 
-
         if self.transform:
             leaf_norm = self.transform(leaf_norm)
 
         if self.include_origins:
-            origin = torch.from_numpy(self.origin_arrays[file_idx][local_idx].astype(np.int32, copy=False))  # type: ignore[index]
+            origin = torch.from_numpy(
+                self.origin_arrays[file_idx][local_idx].astype(np.int32, copy=False))  # type: ignore[index]
             return leaf_norm, origin
         return leaf
-
 
 
 class VectorQuantizerEMA(nn.Module):
@@ -168,6 +168,7 @@ def icnr_(tensor, upscale_factor=2, initializer=nn.init.kaiming_normal_):
     with torch.no_grad():
         tensor.copy_(temp)
 
+
 class PixelShuffle3D(nn.Module):
     def __init__(self, upscale_factor: int = 2):
         super().__init__()
@@ -177,16 +178,18 @@ class PixelShuffle3D(nn.Module):
         b, c, d, h, w = x.size()
         r = self.r
         oc = c // (r * r * r)
-        
+
         if c % (r * r * r) != 0:
             raise RuntimeError("Channels not divisible by r^3.")
-        
+
         x = x.view(b, oc, r, r, r, d, h, w)
         x = x.permute(0, 1, 5, 2, 6, 3, 7, 4)
         return x.contiguous().view(b, oc, d * r, h * r, w * r)
-        
+
+
 class ResidualBlock(nn.Module):
     """Pre-activation, GN-only residual block with residual scaling."""
+
     def __init__(self, channels, groups=8, scale=0.1):
         super().__init__()
         self.scale = scale
@@ -205,8 +208,8 @@ class ResidualBlock(nn.Module):
         x = self.relu(self.gn2(x))
         x = self.conv2(x)
         return residual + self.scale * x
-    
-    
+
+
 class ChannelAttention(nn.Module):
     def __init__(self, channels, reduction=4):
         super().__init__()
@@ -223,6 +226,7 @@ class ChannelAttention(nn.Module):
         y = self.avg_pool(x).view(b, c)
         y = self.fc(y).view(b, c, 1, 1, 1)
         return x * y.expand_as(x)
+
 
 class EncoderFloat(nn.Module):
     def __init__(self, in_channels: int, embedding_dim: int):
@@ -244,6 +248,7 @@ class EncoderFloat(nn.Module):
         x = self.res_stack(x)
         x = self.attn(x)
         return self.proj(x)
+
 
 class DecoderFloat(nn.Module):
     def __init__(self, embedding_dim: int, out_channels: int):
@@ -269,6 +274,7 @@ class DecoderFloat(nn.Module):
         x = self.pixshuf(self.up_conv(x))
         return torch.sigmoid(self.final(x))
 
+
 class EncoderVec3(nn.Module):
     def __init__(self, in_channels: int, embedding_dim: int = 64):
         super().__init__()
@@ -291,6 +297,7 @@ class EncoderVec3(nn.Module):
         x = self.res_stack(x)
         x = self.attn(x)
         return self.proj(x)
+
 
 class DecoderVec3(nn.Module):
     def __init__(self, embedding_dim, out_channels):
@@ -321,10 +328,10 @@ class DecoderVec3(nn.Module):
 class VQVAE(nn.Module):
     def __init__(self, in_channels, embedding_dim, num_embeddings, commitment_cost):
         super(VQVAE, self).__init__()
-        if in_channels == 1:             # float
+        if in_channels == 1:  # float
             self.encoder = EncoderFloat(in_channels, embedding_dim)
             self.decoder = DecoderFloat(embedding_dim, in_channels)
-        else:                            # vec3f
+        else:  # vec3f
             self.encoder = EncoderVec3(in_channels, embedding_dim)
             self.decoder = DecoderVec3(embedding_dim, in_channels)
 
@@ -334,7 +341,6 @@ class VQVAE(nn.Module):
             commitment_cost=commitment_cost,
         )
 
-        
     def forward(self, x):
         z = self.encoder(x)
         quantized, vq_loss, perplexity = self.quantizer(z)
@@ -372,8 +378,7 @@ class VQVAE(nn.Module):
 
     def get_codebook(self) -> torch.Tensor:
         return self.quantizer.embedding
-    
-    
+
     def check_and_reset_dead_codes(self, encoder_outputs):
         """
         Checks for and resets dead codes in the quantizer's codebook by
@@ -381,17 +386,17 @@ class VQVAE(nn.Module):
         """
         # Ensure you are on the correct device
         device = self.quantizer.embedding.device
-        
+
         # Use .detach() to ensure this operation is not part of the autograd graph
         flat_z = self.encoder_outputs_to_flat(encoder_outputs.detach())
 
         with torch.no_grad():
             # 1. Identify dead codes
-            dead_code_threshold = 1.0 # A reasonable threshold
+            dead_code_threshold = 1.0  # A reasonable threshold
             dead_indices = torch.where(self.quantizer.cluster_size < dead_code_threshold)[0]
 
             if len(dead_indices) == 0:
-                return # Nothing to do
+                return  # Nothing to do
 
             print(f"INFO: Resetting {len(dead_indices)} dead codes.")
 
@@ -409,7 +414,7 @@ class VQVAE(nn.Module):
             # 3. Assign the new embeddings and reset their stats
             self.quantizer.embedding.data[dead_indices] = new_embeddings
             self.quantizer.embed_avg.data[dead_indices] = new_embeddings
-            self.quantizer.cluster_size.data[dead_indices] = 1.0 # Reset usage count to 1
+            self.quantizer.cluster_size.data[dead_indices] = 1.0  # Reset usage count to 1
 
     def encoder_outputs_to_flat(self, z):
         """Helper to flatten encoder outputs for processing."""

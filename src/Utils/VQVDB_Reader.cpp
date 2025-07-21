@@ -1,3 +1,11 @@
+/*
+ * Copyright (c) 2025, Enzo Crema
+ *
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * See the LICENSE file in the project root for full license text.
+ */
+
 #include "VQVDB_Reader.hpp"
 
 #include <cstring>

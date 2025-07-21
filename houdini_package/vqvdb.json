@@ -1,13 +1,33 @@
 {
+    "load_package_once": true,
     "env": [
         {
-            "VQVDB_PATH": "$HOUDINI_PACKAGE_PATH/.."
-        },
-        {
-            "HOUDINI_PATH": "$VQVDB_PATH"
+            "VQVDB_PATH": "$HOUDINI_PACKAGE_PATH/vqvdb0.0.5"
         },
         {
             "PATH": "$VQVDB_PATH/bin"
+        },
+        {
+            "HOUDINI_OTLSCAN_PATH": {
+                "value": "$VQVDB_PATH/otls",
+                "method": "append"
+            }
+        },
+        {
+            "HOUDINI_PATH": [
+                {
+                    "houdini_version == '20.5.613'": "$VQVDB_PATH/houdini20.5.613",
+                    "method": "append"
+                },
+                {
+                    "houdini_version == '20.5.584'": "$VQVDB_PATH/houdini20.5.584",
+                    "method": "append"
+                },
+                {
+                    "houdini_version == '20.0.522'": "$VQVDB_PATH/houdini20.0.522",
+                    "method": "append"
+                }
+            ]
         }
     ]
 }

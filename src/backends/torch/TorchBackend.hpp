@@ -1,6 +1,10 @@
-//
-// Created by zphrfx on 05/07/2025.
-//
+/*
+ * Copyright (c) 2025, Enzo Crema
+ *
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * See the LICENSE file in the project root for full license text.
+ */
 
 #pragma once
 

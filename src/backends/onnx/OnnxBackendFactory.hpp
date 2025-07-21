@@ -1,3 +1,11 @@
+/*
+ * Copyright (c) 2025, Enzo Crema
+ *
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * See the LICENSE file in the project root for full license text.
+ */
+
 #pragma once
 
 #include <onnxruntime/core/session/onnxruntime_cxx_api.h>
@@ -38,7 +46,7 @@ class OnnxBackendFactory : public IVQVAECodec {
 	virtual Tensor decode_impl(const TensorView& indices) const = 0;
 
 	// Common members
-	Ort::Env env_;
+	std::unique_ptr<Ort::Env> env_;
 	Ort::SessionOptions sessionOptions_;
 	std::unique_ptr<Ort::Session> encoderSession_;
 	std::unique_ptr<Ort::Session> decoderSession_;

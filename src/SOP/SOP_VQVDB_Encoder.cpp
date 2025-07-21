@@ -1,3 +1,11 @@
+/*
+ * Copyright (c) 2025, Enzo Crema
+ *
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * See the LICENSE file in the project root for full license text.
+ */
+
 #include "SOP_VQVDB_Encoder.hpp"
 
 #include <GU/GU_Detail.h>

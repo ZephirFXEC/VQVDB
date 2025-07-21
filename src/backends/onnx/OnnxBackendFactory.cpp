@@ -1,3 +1,11 @@
+/*
+ * Copyright (c) 2025, Enzo Crema
+ *
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * See the LICENSE file in the project root for full license text.
+ */
+
 #include "OnnxBackendFactory.hpp"
 
 #include <fstream>
@@ -72,11 +80,13 @@ extern "C" void ORT_API_CALL onnxConsoleLogger(void*, OrtLoggingLevel /*severity
 	std::cout << "[ORT] " << message << std::endl;
 }
 
-OnnxBackendFactory::OnnxBackendFactory() : env_(ORT_LOGGING_LEVEL_WARNING, "VQVAECodec", onnxConsoleLogger, nullptr) {}
+OnnxBackendFactory::OnnxBackendFactory() {
+	env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "VQVAECodec", onnxConsoleLogger, nullptr);
+}
 
 void OnnxBackendFactory::init(const CodecConfig& config) {
 	sessionOptions_.SetIntraOpNumThreads(std::max(1, (int)std::thread::hardware_concurrency() / 2));
-	sessionOptions_.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
+	sessionOptions_.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
 	configure_execution_provider();
 
@@ -110,8 +120,8 @@ void OnnxBackendFactory::setup_sessions(const ModelSource& source) {
 
 	// Create sessions
 	try {
-		encoderSession_ = std::make_unique<Ort::Session>(env_, encoderData.data(), encoderData.size(), sessionOptions_);
-		decoderSession_ = std::make_unique<Ort::Session>(env_, decoderData.data(), decoderData.size(), sessionOptions_);
+		encoderSession_ = std::make_unique<Ort::Session>(*env_, encoderData.data(), encoderData.size(), sessionOptions_);
+		decoderSession_ = std::make_unique<Ort::Session>(*env_, decoderData.data(), decoderData.size(), sessionOptions_);
 	} catch (const Ort::Exception& e) {
 		throw std::runtime_error("Failed to create ONNX sessions: " + std::string(e.what()));
 	}

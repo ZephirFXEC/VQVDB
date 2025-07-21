@@ -1,10 +1,19 @@
+/*
+ * Copyright (c) 2025, Enzo Crema
+ *
+ * SPDX-License-Identifier: BSD-3-Clause
+ *
+ * See the LICENSE file in the project root for full license text.
+ */
+
 #pragma once
 
 #include <openvdb/Types.h>
-#include "core/IVQVAECodec.hpp" // Include to get Tensor & TensorView
 
 #include <fstream>
 #include <string>
+
+#include "core/IVQVAECodec.hpp"  // Include to get Tensor & TensorView
 
 
 struct VQVDBMetadata {
@@ -34,7 +43,7 @@ struct VQVDBFileHeader {
 #pragma pack(pop)
 
 struct EncodedBatch {
-	Tensor data; // Changed from torch::Tensor to our generic Tensor
+	Tensor data;  // Changed from torch::Tensor to our generic Tensor
 	std::vector<openvdb::Coord> origins;
 };
 
