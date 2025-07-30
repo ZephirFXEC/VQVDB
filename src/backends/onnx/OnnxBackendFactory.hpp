@@ -8,7 +8,9 @@
 
 #pragma once
 
+#define ORT_API_MANUAL_INIT
 #include <onnxruntime/core/session/onnxruntime_cxx_api.h>
+#undef ORT_API_MANUAL_INIT
 
 #include <filesystem>
 #include <memory>
