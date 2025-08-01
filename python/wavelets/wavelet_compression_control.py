@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 
+# --- (No changes to imports or DLL paths) ---
 os.add_dll_directory("C:/Users/zphrfx/Desktop/hdk/VQVDB/.venv/Lib/site-packages")
 os.add_dll_directory("C:/vcpkg/installed/x64-windows/bin")
 
@@ -22,8 +23,9 @@ from sklearn.decomposition import IncrementalPCA
 # Ensure predictable backend
 tl.set_backend("numpy")
 
+
 # ------------------------------------------------------------
-# Wavelet helpers
+# Wavelet helpers (No changes)
 # ------------------------------------------------------------
 
 
@@ -36,11 +38,6 @@ def wavedec3(block: np.ndarray, wavelet: str, level: int):
 def waverec3(arr: np.ndarray, coeff_slices, wavelet: str) -> np.ndarray:
     coeffs = pywt.array_to_coeffs(arr, coeff_slices, output_format="wavedecn")
     return pywt.waverecn(coeffs, wavelet=wavelet, mode="periodization")
-
-
-# ------------------------------------------------------------
-# Quantisation helpers
-# ------------------------------------------------------------
 
 
 def quantise(x: np.ndarray, n_bits: int):
@@ -59,6 +56,172 @@ def compute_rmse(a: np.ndarray, b: np.ndarray):
     return float(np.sqrt(np.mean((a_f - b_f) ** 2)))
 
 
+def _pad_init_cp(init_weights, init_factors, target_rank: int):
+    """
+    Pads a low-rank CP initial guess up to `target_rank` and re-normalises it.
+
+    Returns
+    -------
+    (weights, factors) : tuple
+        A properly sized CP decomposition with unit-norm columns.
+    """
+    init_rank = init_weights.shape[0]
+
+    # If already large enough, truncate / normalise and return.
+    if init_rank >= target_rank:
+        trimmed = (
+            init_weights[:target_rank],
+            [f[:, :target_rank] for f in init_factors],
+        )
+        return cp_normalize(trimmed)
+
+    padding_rank = target_rank - init_rank
+    ctx = tl.context(init_weights)
+
+    # ---- pad weights -------------------------------------------------
+    final_weights = tl.zeros(target_rank, **ctx)
+    final_weights[:init_rank] = init_weights
+    final_weights[init_rank:] = tl.mean(init_weights) if init_rank else 1.0
+
+    # ---- pad factors -------------------------------------------------
+    final_factors = []
+    for F in init_factors:
+        newF = tl.zeros((F.shape[0], target_rank), **ctx)
+        newF[:, :init_rank] = F
+
+        rnd = np.random.random((F.shape[0], padding_rank)).astype(F.dtype)
+        # scale random columns to average norm of existing ones
+        avg_norm = tl.mean(tl.norm(F, axis=0)) if init_rank else 1.0
+        newF[:, init_rank:] = rnd * avg_norm
+        final_factors.append(newF)
+
+    # Ensure unit-norm columns so ALS starts stable
+    return cp_normalize((final_weights, final_factors))
+
+
+# ---------------------------------------------------------------------
+# 2.  Hybrid direct CP compression (now stable & overflow-safe)
+# ---------------------------------------------------------------------
+def _hybrid_direct_cp_compress(
+    q_tensor: np.ndarray, rank: int, n_iter_max: int = 100, dtype=np.float32
+):
+    """
+    Robust, memory-safe CP via two-stage init  ➜  full PARAFAC.
+
+    * The quantised tensor is first **whitened** to max-abs ≤ 1 to
+      avoid float32 overflow inside ALS.
+    * Factor columns are re-normalised every iteration
+      (`normalize_factors=True`) so growth is pushed into `weights`.
+    """
+    # ---------- 0 · Rescale tensor to [-1, 1] -------------------------
+    scale_back = np.max(np.abs(q_tensor))
+    scale_back = 1.0 if scale_back == 0 else scale_back
+    tensor = (q_tensor / scale_back).astype(dtype)
+
+    n_frames = tensor.shape[0]
+    init_rank = min(rank - 1, n_frames - 2, 32)
+
+    # ---------- 1 · Obtain low-rank seed -----------------------------
+    if init_rank <= 0:
+        init_method = "random"
+    else:
+        try:
+            w0, f0 = _two_stage_cp_compress(q_tensor, rank=init_rank)
+            init_method = _pad_init_cp(w0, f0, rank)
+        except Exception:
+            init_method = "random"
+
+    # ---------- 2 · Full PARAFAC with safe settings ------------------
+    weights, factors = parafac(
+        tensor,
+        rank=rank,
+        init=init_method,
+        n_iter_max=n_iter_max,
+        tol=1e-7,
+        normalize_factors=True,  # ← keeps column norms ≈ 1
+        verbose=False,
+    )
+
+    # ---------- 3 · Undo whitening ----------------------------------
+    weights = weights * scale_back
+    return weights, factors
+
+
+# ---------------------------------------------------------------------
+# 3.  Optional CP refinement (just passes extra kwarg)
+# ---------------------------------------------------------------------
+def _refine_cp(
+    q_tensor: np.ndarray, weights, factors, n_iter: int = 10, tol: float = 1e-6
+):
+    """
+    Light ALS sweep to polish an existing CP solution.
+    """
+    tensor = q_tensor.astype(np.float32)
+    rank = weights.shape[0]
+
+    try:
+        weights, factors = parafac(
+            tensor,
+            rank=rank,
+            init=(weights, factors),
+            n_iter_max=n_iter,
+            tol=tol,
+            normalize_factors=True,  # ← same safety guard
+            verbose=False,
+        )
+    except Exception:
+        # keep original on failure
+        pass
+
+    return weights, factors
+
+
+def _apply_coefficient_thresholding(
+    tensor: np.ndarray, keep_percent: float
+) -> np.ndarray:
+    """
+    Keeps only the largest `keep_percent` of wavelet coefficients, setting
+    the rest to zero. This is a key step for controlling loss vs. compression.
+    """
+    if keep_percent >= 100.0:
+        logging.debug("keep_percent is 100; skipping thresholding.")
+        return tensor
+
+    logging.info(
+        "Applying coefficient thresholding to keep top %.2f%%...", keep_percent
+    )
+
+    # Get absolute values of all coefficients
+    abs_coeffs = np.abs(tensor.ravel())
+
+    # We only want to consider non-zero coefficients for the percentile calculation
+    # to avoid skewing by the existing zeros.
+    abs_coeffs_nonzero = abs_coeffs[abs_coeffs > 1e-9]
+    if abs_coeffs_nonzero.size == 0:
+        logging.warning("Tensor is all zeros; skipping thresholding.")
+        return tensor
+
+    # Calculate the threshold value.
+    # e.g., if keep_percent is 80, we want to find the 20th percentile.
+    percentile_to_cut = 100.0 - keep_percent
+    threshold = np.percentile(abs_coeffs_nonzero, percentile_to_cut)
+
+    logging.info(
+        f"Calculated threshold: {threshold:.6f}. Setting coefficients smaller than this to zero."
+    )
+
+    # Apply the threshold
+    tensor_thresholded = tensor.copy()
+    tensor_thresholded[np.abs(tensor_thresholded) < threshold] = 0.0
+
+    sparsity = 100.0 * np.count_nonzero(tensor_thresholded) / tensor_thresholded.size
+    logging.info(
+        f"Thresholding complete. Tensor sparsity is now {sparsity:.2f}% (non-zero elements)."
+    )
+
+    return tensor_thresholded
+
+
 # ------------------------------------------------------------
 # CP helpers
 # ------------------------------------------------------------
@@ -66,8 +229,8 @@ def compute_rmse(a: np.ndarray, b: np.ndarray):
 
 def _two_stage_cp_compress(q_tensor: np.ndarray, rank: int, batch_size: int = 256):
     """
-    Memory-efficient two-stage approximate CP (Kruskal) decomposition with
-    the PCA mean folded in as an extra constant temporal component.
+    Memory-efficient two-stage approximate CP (Kruskal) decomposition.
+    Limited by rank < n_frames.
     Returns: (weights, [A, B, C]) where rank returned is original rank+1.
     """
     n_frames, n_blocks, coeff_len = q_tensor.shape
@@ -77,6 +240,7 @@ def _two_stage_cp_compress(q_tensor: np.ndarray, rank: int, batch_size: int = 25
     )
     flat_tensor = q_tensor.reshape(n_frames, -1).astype(np.float32)
 
+    # --- (rest of this function is unchanged) ---
     ipca = IncrementalPCA(n_components=rank, batch_size=batch_size)
 
     logging.info("Running Incremental PCA to extract temporal factor...")
@@ -134,50 +298,22 @@ def _two_stage_cp_compress(q_tensor: np.ndarray, rank: int, batch_size: int = 25
     return weights, [A, B, C]
 
 
-def _refine_cp(q_tensor: np.ndarray, weights, factors, n_iter=10, tol=1e-6):
+def _direct_cp_compress(q_tensor: np.ndarray, rank: int, n_iter_max: int = 100):
     """
-    Attempt to refine the CP approximation using ALS starting from the provided factors.
-    Falls back silently if the API variant doesn't apply.
+    Performs a direct CP decomposition using Tensorly's PARAFAC.
+    More memory intensive but not limited by n_frames for the rank.
     """
+    logging.info("Performing direct CP compression (PARAFAC) with rank=%d...", rank)
     tensor = q_tensor.astype(np.float32)
-    rank = weights.shape[0]
-    logging.info(
-        "Attempting CP refinement with ALS (rank=%d, max_iter=%d)...", rank, n_iter
-    )
     try:
-        # Try modern variant first
-        cp_refined = parafac(
-            tensor, rank=rank, init=(weights, factors), n_iter_max=n_iter, tol=tol
+        weights, factors = parafac(
+            tensor, rank=rank, n_iter_max=n_iter_max, tol=1e-7, verbose=0
         )
-    except TypeError:
-        try:
-            cp_refined = parafac(
-                tensor,
-                rank=rank,
-                init="custom",
-                init_factors=(weights, factors),
-                n_iter_max=n_iter,
-                tol=tol,
-            )
-        except Exception as e:
-            logging.warning(
-                "CP refinement failed (fallback API) with error: %s; using initial factors.",
-                e,
-            )
-            return weights, factors
-    except Exception as e:
-        logging.warning(
-            "CP refinement failed with error: %s; using initial factors.", e
-        )
+        logging.info("Direct CP compression succeeded.")
         return weights, factors
-
-    if hasattr(cp_refined, "weights") and hasattr(cp_refined, "factors"):
-        logging.info("CP refinement succeeded.")
-        return cp_refined.weights, cp_refined.factors
-    else:
-        # assume tuple
-        logging.info("CP refinement returned raw tuple.")
-        return cp_refined  # type: ignore
+    except Exception as e:
+        logging.error("Direct CP compression failed: %s", e)
+        raise
 
 
 def cp_decompress(weights: np.ndarray, factors):
@@ -185,10 +321,8 @@ def cp_decompress(weights: np.ndarray, factors):
 
 
 # ------------------------------------------------------------
-# Leaf block insertion (vectorized)
+# Leaf block insertion & Header (No changes)
 # ------------------------------------------------------------
-
-
 def insert_leaf_blocks(
     grid_template: vdb.FloatGrid, coords, blocks, block_size: int = 8
 ):
@@ -205,10 +339,6 @@ def insert_leaf_blocks(
             acc.setValueOn(coord, float(val))
     return grid
 
-
-# ------------------------------------------------------------
-# Container header
-# ------------------------------------------------------------
 
 MAGIC = b"VDBR\0"
 HEADER_STRUCT = struct.Struct(
@@ -230,12 +360,18 @@ class VDBSequenceCompressor:
         rank=32,
         quant_bits=12,
         wavelet="haar",
+        # --- NEW parameters with defaults ---
+        keep_coeffs_percent=100.0,
+        cp_method="direct",
     ):
         self.block = block
         self.levels = levels
         self.rank = rank
         self.quant_bits = quant_bits
         self.wavelet = wavelet
+        # --- NEW parameters ---
+        self.keep_coeffs_percent = keep_coeffs_percent
+        self.cp_method = cp_method
 
     def _analyse_frames_from_npy(self, npy_paths: List[str], origin_paths: List[str]):
         if not origin_paths:
@@ -308,35 +444,53 @@ class VDBSequenceCompressor:
 
         n_frames, n_blocks, coeff_len = coeff_tensor.shape
 
-        if n_frames <= 1:
-            raise ValueError(
-                f"CP/Parafac decomposition requires a sequence of length > 1. Received {n_frames} frames."
-            )
+        coeff_tensor_thresholded = _apply_coefficient_thresholding(
+            coeff_tensor, self.keep_coeffs_percent
+        )
 
-        # Quantisation
-        q_tensor, scale = quantise(coeff_tensor, self.quant_bits)
+        # 2. Quantisation
+        q_tensor, scale = quantise(coeff_tensor_thresholded, self.quant_bits)
         logging.info(
             "Quantisation complete. Bits=%d. Quantization RMSE (wavelet domain): %.6f",
             self.quant_bits,
-            compute_rmse(coeff_tensor, dequantise(q_tensor, scale)),
+            compute_rmse(coeff_tensor_thresholded, dequantise(q_tensor, scale)),
         )
 
-        logging.info(
-            "Performing two-stage CP compression on quantized tensor of shape %s...",
-            q_tensor.shape,
-        )
-        weights, factors = _two_stage_cp_compress(q_tensor, self.rank)
-        A, B, C = factors
+        # 3. CP Decomposition (with choice of method)
+        if self.cp_method == "two-stage":
+            if self.rank >= n_frames:
+                logging.warning(
+                    f"Rank ({self.rank}) must be less than n_frames ({n_frames}) for 'two-stage' method. "
+                    f"Consider using '--cp-method direct' or reducing the rank."
+                )
+                self.rank = n_frames - 1
+                logging.warning(f"Clamping rank to {self.rank}.")
+
+            logging.info(
+                "Performing two-stage CP compression on quantized tensor of shape %s...",
+                q_tensor.shape,
+            )
+            weights, factors = _two_stage_cp_compress(q_tensor, self.rank)
+            A, B, C = factors
+        elif self.cp_method == "direct":
+            logging.info(
+                "Performing direct CP compression on quantized tensor of shape %s...",
+                q_tensor.shape,
+            )
+            weights, factors = _hybrid_direct_cp_compress(q_tensor, self.rank)
+            A, B, C = factors
+        else:
+            raise ValueError(f"Unknown cp_method: {self.cp_method}")
 
         # CP approximation error before refinement
         approx_q = cp_decompress(weights, [A, B, C])
         rmse_before = compute_rmse(q_tensor, approx_q)
         logging.info(
             "CP approximation RMSE before refinement: %.6f (on quantized tensor)",
-            rmse_before / scale,
+            rmse_before,
         )
 
-        # Optional refinement
+        # 4. Optional refinement
         if refine_cp:
             weights_refined, factors_refined = _refine_cp(q_tensor, weights, [A, B, C])
             A, B, C = factors_refined
@@ -345,13 +499,15 @@ class VDBSequenceCompressor:
             rmse_after = compute_rmse(q_tensor, approx_q_refined)
             logging.info(
                 "CP approximation RMSE after refinement: %.6f (on quantized tensor)",
-                rmse_after / scale,
+                rmse_after,
             )
         else:
             logging.debug("Skipping CP refinement (disabled).")
 
         logging.info("Final CP rank stored: %d", weights.shape[0])
         logging.info("Factor shapes: A=%s, B=%s, C=%s", A.shape, B.shape, C.shape)
+
+        # --- (Rest of the function is the same, just writes the data) ---
 
         # Metadata augmentation
         if not all(
@@ -366,7 +522,6 @@ class VDBSequenceCompressor:
 
         meta_bytes = json.dumps(grid_metadata).encode()
 
-        # ---------------- write container ----------------
         with open(out_path, "wb") as fp:
             fp.write(
                 HEADER_STRUCT.pack(
@@ -382,15 +537,23 @@ class VDBSequenceCompressor:
             fp.write(C.astype(np.float32).tobytes())
 
         compressed_size = pathlib.Path(out_path).stat().st_size
-        uncompressed_size = coeff_tensor.nbytes  # approximate
+
+        # A more fair comparison for uncompressed size
+        uncompressed_size = coeff_tensor.nbytes
         ratio = uncompressed_size / compressed_size if compressed_size else float("inf")
         logging.info(
-            "Successfully compressed %d frames to %s. Compression ratio (wavelet coeffs raw / file): %.2f",
+            "Successfully compressed %d frames to %s. Size: %.2f MB",
             n_frames,
             out_path,
+            compressed_size / (1024 * 1024),
+        )
+        logging.info(
+            "Uncompressed wavelet coeffs size: %.2f MB. Compression Ratio: %.2f:1",
+            uncompressed_size / (1024 * 1024),
             ratio,
         )
 
+    # --- decompress and other methods are unchanged ---
     def decompress(self, in_path: str, out_dir: str):
         out_dir = pathlib.Path(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -470,7 +633,7 @@ class VDBSequenceCompressor:
 
 def main():
     ap = argparse.ArgumentParser(
-        description="OpenVDB sequence compressor (v0.3 improved)"
+        description="OpenVDB sequence compressor (v0.4, with quality controls)"
     )
     ap.add_argument(
         "-v",
@@ -505,28 +668,57 @@ def main():
     c_npy.add_argument("out_file", help="Output compressed file path")
     c_npy.add_argument("--start", type=int, default=0, help="Start frame number")
     c_npy.add_argument("--end", type=int, required=True, help="End frame number")
-    c_npy.add_argument("--block", type=int, default=8)
-    c_npy.add_argument("--levels", type=int, default=2)
-    c_npy.add_argument("--rank", type=int, default=32)
-    c_npy.add_argument(
+
+    # --- MODIFIED: Added more control knobs ---
+    g_quality = c_npy.add_argument_group("Quality and Compression Controls")
+    g_quality.add_argument("--block", type=int, default=8)
+    g_quality.add_argument("--levels", type=int, default=2)
+    g_quality.add_argument(
+        "--rank",
+        type=int,
+        default=32,
+        help="Rank for the CP decomposition. Higher means better quality and larger file size.",
+    )
+    g_quality.add_argument(
+        "--quant-bits",
+        type=int,
+        default=12,
+        help="Number of bits for quantizing wavelet coeffs. (e.g., 8-16). Lower is smaller/lossier.",
+    )
+    g_quality.add_argument(
+        "--keep-coeffs",
+        type=float,
+        default=100.0,
+        help="Percentage of wavelet coefficients to keep (0-100). Lower is smaller/lossier.",
+    )
+    g_quality.add_argument(
+        "--cp-method",
+        choices=["two-stage", "direct"],
+        default="two-stage",
+        help="CP decomposition method. 'direct' is slower but allows rank > n_frames.",
+    )
+
+    g_meta = c_npy.add_argument_group("Grid Metadata (Required)")
+    g_meta.add_argument(
         "--grid-name",
         type=str,
         required=True,
         help="Name of the original grid (e.g., 'density')",
     )
-    c_npy.add_argument(
+    g_meta.add_argument(
         "--voxel-size",
         type=float,
         nargs=3,
         required=True,
         help="Voxel size (e.g., 0.1 0.1 0.1)",
     )
-    c_npy.add_argument(
+    g_meta.add_argument(
         "--background",
         type=float,
         required=True,
         help="Background value of the grid (e.g., 0.0)",
     )
+
     c_npy.add_argument(
         "--refine-cp",
         action="store_true",
@@ -548,10 +740,19 @@ def main():
         level = logging.WARNING
     logging.basicConfig(level=level, format="%(asctime)s [%(levelname)s] %(message)s")
 
+    if args.cmd == "decompress":
+        comp = VDBSequenceCompressor()  # Use default params for decompression
+        comp.decompress(args.in_file, args.out_dir)
+        return
+
+    # --- MODIFIED: Pass all new args to the compressor ---
     comp = VDBSequenceCompressor(
-        block=args.block if hasattr(args, "block") else 8,
-        levels=args.levels if hasattr(args, "levels") else 2,
-        rank=args.rank if hasattr(args, "rank") else 32,
+        block=args.block,
+        levels=args.levels,
+        rank=args.rank,
+        quant_bits=args.quant_bits if hasattr(args, "quant_bits") else 12,
+        keep_coeffs_percent=args.keep_coeffs if hasattr(args, "keep_coeffs") else 100.0,
+        cp_method=args.cp_method if hasattr(args, "cp_method") else "two-stage",
     )
 
     if args.cmd == "compress":
@@ -570,18 +771,9 @@ def main():
             "voxel_size": args.voxel_size,
             "background": args.background,
         }
-        comp = VDBSequenceCompressor(
-            block=args.block,
-            levels=args.levels,
-            rank=args.rank,
-            quant_bits=12,
-            wavelet="haar",
-        )
         comp.compress_from_npy(
             npy_paths, origin_paths, args.out_file, metadata, refine_cp=args.refine_cp
         )
-    else:  # decompress
-        comp.decompress(args.in_file, args.out_dir)
 
 
 if __name__ == "__main__":
