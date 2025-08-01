@@ -14,7 +14,11 @@
 <div align="center">
   <h2> <a href=https://github.com/ZephirFXEC/VQVDB/releases/>Download the latest version</a> </h2>
 </div>
-<br>
+
+<div align="center">
+  <h2> <a href=https://discord.gg/DgAhy9NHRH>Discord Support Community</a> </h2>
+</div>
+
 
 # Overview 
 
