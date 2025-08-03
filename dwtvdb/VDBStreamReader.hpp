@@ -10,26 +10,38 @@
 
 #include <openvdb/openvdb.h>
 
-#include <unsupported/Eigen/CXX11/Tensor>
 #include <string>
+#include <unsupported/Eigen/CXX11/Tensor>
 #include <vector>
 
 struct DenseBlock {
-	Eigen::Tensor<float, 3> data;  ///< blockSize³ values
-	openvdb::Coord origin;        ///< index-space origin in the grid
+	openvdb::Coord origin;
+	Eigen::Tensor<float, 3> data;
 };
 
-class VDBStreamReader {
+struct VDBFrame {
+	std::vector<DenseBlock> blocks;
+	openvdb::FloatGrid::ConstPtr grid;
+};
+
+
+class VDBSequence {
    public:
-	explicit VDBStreamReader(int blockSize = 8) : m_blockSize(blockSize) { openvdb::initialize(); }
-
-	/// Extract all leaf blocks of size `blockSize³` from grid `gridName`
-	/// in frame `vdbPath`.
-	std::vector<DenseBlock> readFrame(const std::string& vdbPath, const std::string& gridName = "density") const;
-
-	/// Returns N frames worth of blocks + union‐of‐origins list.
-	std::vector<std::vector<DenseBlock>> readSequence(const std::vector<std::string>& paths, const std::string& gridName = "density") const;
+	explicit VDBSequence(std::vector<VDBFrame> frames) : m_frames(std::move(frames)) {}
+	[[nodiscard]] const std::vector<VDBFrame>& frames() const noexcept { return m_frames; }
+	[[nodiscard]] size_t size() const noexcept { return m_frames.size(); }
+	[[nodiscard]] const VDBFrame& operator[](size_t i) const { return m_frames[i]; }
 
    private:
-	int m_blockSize;
+	std::vector<VDBFrame> m_frames;
+};
+
+
+class VDBLoader {
+   public:
+	explicit VDBLoader() = default;
+
+	[[nodiscard]] VDBFrame loadFrame(const std::string& filePath, const std::string& gridName) const;
+
+	[[nodiscard]] VDBSequence loadSequence(const std::vector<std::string>& filePaths, const std::string& gridName) const;
 };

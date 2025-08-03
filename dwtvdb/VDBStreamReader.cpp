@@ -1,56 +1,37 @@
-/*
- * Copyright (c) 2025, Enzo Crema
- *
- * SPDX-License-Identifier: BSD-3-Clause
- *
- * See the LICENSE file in the project root for full license text.
- */
-
 #include "VDBStreamReader.hpp"
 
-#include <openvdb/tools/ValueTransformer.h>
+#include <openvdb/io/File.h>
 
-#include "Logger.hpp"
+#include <cstring>
 
-std::vector<DenseBlock> VDBStreamReader::readFrame(const std::string& vdbPath, const std::string& gridName) const {
-	logger::debug("Reading frame {}", vdbPath);
-
-	openvdb::io::File file(vdbPath);
+VDBFrame VDBLoader::loadFrame(const std::string& path, const std::string& gridName) const {
+	openvdb::io::File file(path);
 	file.open();
-
-	auto baseGrid = file.readGrid(gridName);
+	openvdb::GridBase::Ptr base = file.readGrid(gridName);
 	file.close();
 
-	auto grid = openvdb::gridPtrCast<openvdb::FloatGrid>(baseGrid);
+	auto grid = openvdb::gridPtrCast<openvdb::FloatGrid>(base);
 	if (!grid) throw std::runtime_error("Grid is not FloatGrid");
 
-	std::vector<DenseBlock> blocks;
-	const int B = m_blockSize;
+	VDBFrame frame;
+	frame.grid = grid;
 
-	for (auto it = grid->tree().cbeginLeaf(); it; ++it) {
-		// OpenVDB default leaf dimension is 8 (=B).
-		static_assert(openvdb::FloatTree::LeafNodeType::DIM == 8, "Code assumes 8³ leaf nodes");
-		const openvdb::Coord& leafOrigin = it->origin();
+	constexpr int B = 8;
 
-		DenseBlock blk;
-		blk.origin = leafOrigin;
-		blk.data = Eigen::Tensor<float, 3>(B, B, B);
+	for (auto leafIt = grid->tree().cbeginLeaf(); leafIt; ++leafIt) {
+		DenseBlock block;
+		block.origin = leafIt->origin();
+		block.data = Eigen::Tensor<float, 3>(B, B, B);
 
-		// Direct memory copy from leaf buffer to tensor
-		const float* leafBuffer = it->buffer().data();
-		std::memcpy(blk.data.data(), leafBuffer, B * B * B * sizeof(float));
-
-		blocks.emplace_back(std::move(blk));
+		std::memcpy(block.data.data(), leafIt->buffer().data(), B * B * B * sizeof(float));
+		frame.blocks.emplace_back(std::move(block));
 	}
-
-	logger::info("  extracted {} leaf blocks", blocks.size());
-	return blocks;
+	return frame;
 }
 
-std::vector<std::vector<DenseBlock>> VDBStreamReader::readSequence(const std::vector<std::string>& paths,
-                                                                   const std::string& gridName) const {
-	std::vector<std::vector<DenseBlock>> seq;
-	seq.reserve(paths.size());
-	for (const auto& p : paths) seq.emplace_back(readFrame(p, gridName));
-	return seq;
+VDBSequence VDBLoader::loadSequence(const std::vector<std::string>& paths, const std::string& gridName) const {
+	std::vector<VDBFrame> frames;
+	frames.reserve(paths.size());
+	for (const auto& p : paths) frames.emplace_back(loadFrame(p, gridName));
+	return VDBSequence(std::move(frames));
 }

@@ -26,11 +26,8 @@ add_executable(DWTVDB
         main.cpp
         VDBStreamReader.cpp
         VDBStreamReader.hpp
-        WaveletCompressor.cpp
-        WaveletCompressor.hpp
         Logger.hpp
-        IncrementalPCA.hpp
-        Wavelet.hpp
+        LeafActivityMask.hpp
 )
 
 target_link_libraries(DWTVDB
