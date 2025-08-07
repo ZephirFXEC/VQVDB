@@ -37,9 +37,13 @@ add_executable(DWTVDB
         VDBStreamReader.hpp
         Logger.hpp
         LeafActivityMask.hpp
-        Wavelet.hpp
         Compressor.hpp
         Compressor.cpp
+        CompressionBackend.hpp
+        FileFormat.hpp
+        ThreadSafeQueue.hpp
+        Pipeline.cpp
+        Pipeline.hpp
 )
 
 target_include_directories(DWTVDB PRIVATE ${POCKETFFT_INCLUDE_DIRS})

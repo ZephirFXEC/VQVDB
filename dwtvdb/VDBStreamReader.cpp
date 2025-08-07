@@ -100,3 +100,50 @@ void VDBWriter::saveSequence(const VDBSequence& seq, const std::string& outputPa
 
 	logger::info("Finished writing VDB sequence.");
 }
+
+
+openvdb::FloatGrid::Ptr VDBStreamReader::readFrame(
+	const int index) const {
+	if (index < 0 || index >= numFrames()) {
+		std::ostringstream oss;
+		oss << "readFrame: index " << index << " out of range [0, "
+			<< (numFrames() - 1) << "]";
+		throw std::out_of_range(oss.str());
+	}
+
+	const std::string& path = paths_[static_cast<size_t>(index)];
+	openvdb::io::File file(path);
+	try {
+		file.open();
+
+		if (!file.hasGrid(gridName_)) {
+			file.close();
+			std::ostringstream oss;
+			oss << "Grid '" << gridName_ << "' not found in file: "
+				<< path;
+			throw std::runtime_error(oss.str());
+		}
+
+		openvdb::GridBase::Ptr base = file.readGrid(gridName_);
+		file.close();
+
+		auto grid = openvdb::gridPtrCast<openvdb::FloatGrid>(base);
+		if (!grid) {
+			std::ostringstream oss;
+			oss << "Grid '" << gridName_ << "' in '" << path
+				<< "' is not a FloatGrid.";
+			throw std::runtime_error(oss.str());
+		}
+		return grid;
+	} catch (const openvdb::IoError& e) {
+		// Ensure file is closed on exceptions
+		try {
+			file.close();
+		} catch (...) {
+		}
+		std::ostringstream oss;
+		oss << "OpenVDB I/O error loading file '" << path
+			<< "': " << e.what();
+		throw std::runtime_error(oss.str());
+	}
+}

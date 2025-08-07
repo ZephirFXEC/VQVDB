@@ -56,3 +56,27 @@ public:
 	 */
 	static void saveSequence(const VDBSequence& seq, const std::string& outputPath);
 };
+
+
+class VDBStreamReader {
+public:
+	VDBStreamReader(std::vector<std::string> paths,
+	                std::string gridName)
+		: paths_(std::move(paths)),
+		  gridName_(std::move(gridName)) {
+	}
+
+	// Number of frames available
+	int numFrames() const { return static_cast<int>(paths_.size()); }
+
+	// Thread-safe random-access frame read. Throws on error.
+	openvdb::FloatGrid::Ptr readFrame(int index) const;
+
+	const std::string& gridName() const { return gridName_; }
+
+	const std::vector<std::string>& paths() const { return paths_; }
+
+private:
+	std::vector<std::string> paths_;
+	std::string gridName_;
+};
