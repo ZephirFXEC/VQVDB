@@ -2,36 +2,45 @@
 
 #include <openvdb/io/File.h>
 
-#include <cstring>
+#include <stdexcept>
+
+#include "logger.hpp"
 
 VDBFrame VDBLoader::loadFrame(const std::string& path, const std::string& gridName) const {
-	openvdb::io::File file(path);
-	file.open();
-	openvdb::GridBase::Ptr base = file.readGrid(gridName);
-	file.close();
+	try {
+		logger::debug("Loading grid '{}' from '{}'", gridName, path);
+		openvdb::io::File file(path);
+		file.open();
 
-	auto grid = openvdb::gridPtrCast<openvdb::FloatGrid>(base);
-	if (!grid) throw std::runtime_error("Grid is not FloatGrid");
+		// Check if the grid exists before trying to read it.
+		if (!file.hasGrid(gridName)) {
+			file.close();
+			throw std::runtime_error("Grid '" + gridName + "' not found in file: " + path);
+		}
 
-	VDBFrame frame;
-	frame.grid = grid;
+		openvdb::GridBase::Ptr base = file.readGrid(gridName);
+		file.close();
 
-	constexpr int B = 8;
+		// Cast to the grid type we expect.
+		auto grid = openvdb::gridPtrCast<openvdb::FloatGrid>(base);
+		if (!grid) {
+			throw std::runtime_error("Grid '" + gridName + "' in file '" + path + "' is not a FloatGrid.");
+		}
 
-	for (auto leafIt = grid->tree().cbeginLeaf(); leafIt; ++leafIt) {
-		DenseBlock block;
-		block.origin = leafIt->origin();
-		block.data = Eigen::Tensor<float, 3>(B, B, B);
-
-		std::memcpy(block.data.data(), leafIt->buffer().data(), B * B * B * sizeof(float));
-		frame.blocks.emplace_back(std::move(block));
+		VDBFrame frame;
+		frame.grid = grid;
+		return frame;
+	} catch (const openvdb::IoError& e) {
+		throw std::runtime_error("OpenVDB I/O error loading file " + path + ": " + e.what());
 	}
-	return frame;
 }
 
 VDBSequence VDBLoader::loadSequence(const std::vector<std::string>& paths, const std::string& gridName) const {
-	std::vector<VDBFrame> frames;
-	frames.reserve(paths.size());
-	for (const auto& p : paths) frames.emplace_back(loadFrame(p, gridName));
-	return VDBSequence(std::move(frames));
+	VDBSequence sequence;
+	sequence.reserve(paths.size());
+	for (const auto& p : paths) {
+		sequence.emplace_back(loadFrame(p, gridName));
+	}
+	logger::info("Successfully loaded {} frames.", sequence.size());
+	return sequence;
 }

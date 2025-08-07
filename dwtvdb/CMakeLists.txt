@@ -7,13 +7,22 @@ list(APPEND CMAKE_PREFIX_PATH "$ENV{HFS}/toolkit/cmake")
 
 find_package(Houdini REQUIRED)
 find_package(Eigen3 CONFIG REQUIRED)
+find_path(POCKETFFT_INCLUDE_DIRS "pocketfft_hdronly.h")
 find_package(cxxopts CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
 
 if (UNIX)
+    set(ZLIB_LIBRARY "$ENV{HFS}/dsolib/zdll.so")
     set(openvdb_lib "$ENV{HFS}/dsolib/libopenvdb_sesi.so")
 else ()
+    set(ZLIB_LIBRARY "$ENV{HFS}/custom/houdini/dsolib/zdll.lib")
     set(openvdb_lib "$ENV{HFS}/custom/houdini/dsolib/openvdb_sesi.lib")
+endif ()
+
+if (NOT ZLIB_LIBRARY)
+    message(FATAL_ERROR "Could not find Houdini's zlib header or library.")
+else ()
+    message(STATUS "Found ZLIB library: ${ZLIB_LIBRARY}")
 endif ()
 
 add_library(HoudiniVDB INTERFACE)
@@ -28,7 +37,12 @@ add_executable(DWTVDB
         VDBStreamReader.hpp
         Logger.hpp
         LeafActivityMask.hpp
+        Wavelet.hpp
+        WaveletCompressor.cpp
+        WaveletCompressor.hpp
 )
+
+target_include_directories(DWTVDB PRIVATE ${POCKETFFT_INCLUDE_DIRS})
 
 target_link_libraries(DWTVDB
         PUBLIC
@@ -36,4 +50,5 @@ target_link_libraries(DWTVDB
         Eigen3::Eigen
         cxxopts::cxxopts
         spdlog::spdlog_header_only
+        ${ZLIB_LIBRARY}
 )

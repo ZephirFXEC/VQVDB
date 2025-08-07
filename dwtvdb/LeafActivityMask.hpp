@@ -10,12 +10,22 @@
 #include <openvdb/openvdb.h>
 #include <openvdb/tools/GridTransformer.h>
 
+#include <cassert>
 #include <map>
-#include <set>
 #include <utility>
 #include <vector>
 
 #include "VDBStreamReader.hpp"
+#include "Logger.hpp"
+
+// Intrinsic for popcount for performance, with a fallback.
+#if defined(__GNUC__) || defined(__clang__)
+#define popcount(x) __builtin_popcountll(x)
+#else
+// A simple fallback for other compilers (e.g., MSVC, which has __popcnt64)
+// This can be adapted for higher performance on other platforms.
+#define popcount(x) __popcnt64(x)
+#endif
 
 
 template <typename T>
@@ -24,141 +34,154 @@ struct array_view {
 	size_t count = 0;
 
 	array_view() = default;
-	array_view(const T* p, const size_t c) : ptr(p), count(c) {}
+
+	array_view(const T* p, const size_t c) : ptr(p), count(c) {
+	}
 
 	template <size_t N>
-	explicit array_view(const T (&arr)[N]) : ptr(arr), count(N) {}
-
-	const T* data() const { return ptr; }
-	size_t size() const { return count; }
-};
-
-class ActivityAnalyzer {
-   public:
-	struct Window {
-		int start = -1;
-		int end = -1;
-	};
-
-	[[nodiscard]] static std::map<openvdb::Coord, std::vector<Window>> computeWindows(const VDBSequence& seq,
-	                                                                                  int inactivityThresholdFrames = 3);
-};
-
-// One dense 8³ leaf buffer at one time step.
-struct LeafSlice {
-	array_view<float> buffer;
-	int frameIndex;
-};
-
-// All slices that belong to one activity window of one leaf.
-struct LeafWindowSeries {
-	openvdb::Coord origin;
-	ActivityAnalyzer::Window window;
-	std::vector<LeafSlice> slices;
-};
-
-class DataSeriesExtractor {
-   public:
-	[[nodiscard]] static std::vector<LeafWindowSeries> extract(
-	    const VDBSequence& seq, const std::map<openvdb::Coord, std::vector<ActivityAnalyzer::Window>>& windows);
-};
-
-
-inline std::vector<LeafWindowSeries> DataSeriesExtractor::extract(
-    const VDBSequence& seq, const std::map<openvdb::Coord, std::vector<ActivityAnalyzer::Window>>& windows) {
-	std::vector<LeafWindowSeries> result;
-
-	size_t total_windows = 0;
-	for (const auto& pair : windows) {
-		total_windows += pair.second.size();
-	}
-	result.reserve(total_windows);
-
-	// This buffer is read-only and can be safely shared across threads if you ever parallelize.
-	static constexpr float zeros[512] = {};
-	const array_view<float> zero_buffer_view(zeros);  // Create a view once
-
-	for (const auto& [origin, winList] : windows) {
-		for (const auto& w : winList) {
-			LeafWindowSeries series;
-			series.origin = origin;
-			series.window = w;
-
-			if (w.start <= w.end) {
-				series.slices.reserve(w.end - w.start + 1);
-			}
-
-			for (int t = w.start; t <= w.end; ++t) {
-				const auto& [blocks, grid] = seq[t];
-				const openvdb::tree::ValueAccessor<const openvdb::FloatTree> acc(grid->tree());
-
-				if (const auto leaf = acc.probeLeaf(origin)) {
-					series.slices.push_back({array_view<float>(leaf->buffer().data(), 512), t});
-				} else {
-					series.slices.push_back({zero_buffer_view, t});
-				}
-			}
-			result.emplace_back(std::move(series));
-		}
-	}
-	return result;
-}
-
-inline std::map<openvdb::Coord, std::vector<ActivityAnalyzer::Window>> ActivityAnalyzer::computeWindows(
-    const VDBSequence& seq, const int inactivityThresholdFrames) {
-	struct LeafState {
-		std::vector<Window> windows;
-		int currentStart = -1;
-		int inactiveCount = 0;
-	};
-
-	std::map<openvdb::Coord, LeafState> table;
-
-	for (int t = 0; t < static_cast<int>(seq.size()); ++t) {
-		const auto& frame = seq[t];
-		std::set<openvdb::Coord> seen;
-
-		// 1. iterate over every leaf present in this frame
-		openvdb::tree::ValueAccessor<const openvdb::FloatTree> acc(frame.grid->tree());
-		for (auto leafIt = acc.tree().cbeginLeaf(); leafIt; ++leafIt) {
-			const auto& leaf = *leafIt;
-			openvdb::Coord key = leaf.origin();
-			seen.insert(key);
-
-			LeafState& st = table[key];
-			if (!leaf.isInactive()) {
-				st.inactiveCount = 0;
-				if (st.currentStart == -1) st.currentStart = t;
-			} else {
-				++st.inactiveCount;
-				if (st.currentStart != -1 && st.inactiveCount >= inactivityThresholdFrames) {
-					st.windows.push_back({st.currentStart, t - st.inactiveCount});
-					st.currentStart = -1;
-				}
-			}
-		}
-
-		// 2. handle leaves that disappeared
-		for (auto& [key, st] : table) {
-			if (seen.count(key) > 0) continue;  // still active
-			++st.inactiveCount;
-			if (st.currentStart != -1 && st.inactiveCount >= inactivityThresholdFrames) {
-				st.windows.push_back({st.currentStart, t - st.inactiveCount});
-				st.currentStart = -1;
-			}
-		}
+	explicit array_view(const T (&arr)[N]) : ptr(arr), count(N) {
 	}
 
-	// 3. close any open window at end of sequence
-	const int last = static_cast<int>(seq.size()) - 1;
-	std::map<openvdb::Coord, std::vector<Window>> result;
-	for (auto& [key, st] : table) {
-		if (st.currentStart != -1) {
-			st.windows.push_back({st.currentStart, last});
+	[[nodiscard]] const float* data() const { return ptr; }
+
+	[[nodiscard]] float* data() {
+		return const_cast<float*>(ptr);
+	}
+
+	[[nodiscard]] size_t size() const { return count; }
+};
+
+/**
+ * @brief Describes a continuous sequence of frames where a single leaf is present.
+ */
+struct LeafRun {
+	int startFrame;
+	int numFrames;
+};
+
+
+/**
+ * @brief A normalized, leaf-centric database of the entire sequence's layout,
+ *        decomposed into continuous runs of presence for each leaf.
+ *
+ * This structure maps each unique leaf's coordinate to a vector of its
+ * continuous runs. Each run is a unit of compression.
+ */
+class GOPLayout {
+public:
+	// A map from each unique leaf's origin to its timeline of continuous runs.
+	std::map<openvdb::Coord, std::vector<LeafRun>> leaf_runs;
+
+	/**
+	 * @brief Checks if the layout is empty.
+	 */
+	[[nodiscard]] bool empty() const { return leaf_runs.empty(); }
+
+	/**
+	 * @brief Gets the total number of unique leaves across the entire sequence.
+	 */
+	[[nodiscard]] size_t totalUniqueLeaves() const { return leaf_runs.size(); }
+
+
+	/**
+	 * @brief Generates a string summary of the layout.
+	 */
+	[[nodiscard]] std::string toString(size_t max_leaves_to_print = 5) const {
+		if (empty()) {
+			return "Empty GOP Layout (no leaves found)";
 		}
-		if (!st.windows.empty()) {
-			result.emplace(key, std::move(st.windows));
+
+		std::stringstream ss;
+		size_t total_runs = 0;
+		for (const auto& pair : leaf_runs) {
+			total_runs += pair.second.size();
+		}
+
+		ss << "Leaf Run Layout Summary:\n";
+		ss << "  - Total Unique Leaves: " << totalUniqueLeaves() << "\n";
+		ss << "  - Total Compression Runs: " << total_runs << "\n";
+
+		if (max_leaves_to_print == 0 || leaf_runs.empty()) {
+			return ss.str();
+		}
+
+		ss << "\n--- Leaf Run Details (showing first " << std::min(max_leaves_to_print, leaf_runs.size()) << ") ---\n";
+
+		size_t count = 0;
+		for (const auto& [origin, runs] : leaf_runs) {
+			if (count >= max_leaves_to_print) break;
+			ss << "Leaf at " << origin << ":\n";
+			for (const auto& run : runs) {
+				ss << "  - Run: " << run.numFrames << " frames starting at frame " << run.startFrame << "\n";
+			}
+			ss << "\n";
+			count++;
+		}
+		return ss.str();
+	}
+};
+
+class GOPAnalyzer {
+public:
+	/**
+	 * @brief Analyzes a VDB sequence and creates a layout based on the continuous
+	 *        presence of each individual leaf.
+	 *
+	 * This method finds every continuous "run" of frames for each leaf. Each run
+	 * will become an independent unit for compression, which is the correct way
+	 * to handle temporal transforms on sparse, dynamic data.
+	 *
+	 * @param seq The input VDB sequence.
+	 * @param gopSize (Unused) Kept for API compatibility. The analysis is now data-driven.
+	 * @return A GOPLayout object containing the leaf run metadata.
+	 */
+	[[nodiscard]] static GOPLayout analyze(const VDBSequence& seq, int gopSize = 16);
+};
+
+
+// ====================================================================
+// IMPLEMENTATIONS
+// ====================================================================
+
+inline GOPLayout GOPAnalyzer::analyze(const VDBSequence& seq, [[maybe_unused]] const int gopSize) {
+	GOPLayout layout;
+	if (seq.empty()) {
+		return layout;
+	}
+	const int numFrames = static_cast<int>(seq.size());
+
+	// 1. First pass: Collect a full presence timeline for every unique leaf.
+	std::map<openvdb::Coord, std::vector<bool>> presence_timelines;
+	for (int t = 0; t < numFrames; ++t) {
+		const auto& [grid] = seq[t];
+		for (auto leafIt = grid->tree().cbeginLeaf(); leafIt; ++leafIt) {
+			const openvdb::Coord origin = leafIt->origin();
+			// Ensure the timeline vector exists and is the correct size.
+			if (presence_timelines.find(origin) == presence_timelines.end()) {
+				presence_timelines[origin].resize(numFrames, false);
+			}
+			presence_timelines[origin][t] = true;
 		}
 	}
-	return result;
+
+	// 2. Second pass: For each leaf's timeline, find its continuous runs.
+	for (auto const& [origin, timeline] : presence_timelines) {
+		int current_run_start = -1;
+		for (int t = 0; t < numFrames; ++t) {
+			if (timeline[t] && current_run_start == -1) {
+				// Start of a new run
+				current_run_start = t;
+			} else if (!timeline[t] && current_run_start != -1) {
+				// End of the current run
+				layout.leaf_runs[origin].push_back({current_run_start, t - current_run_start});
+				current_run_start = -1;
+			}
+		}
+		// If a run was active until the very last frame
+		if (current_run_start != -1) {
+			layout.leaf_runs[origin].push_back({current_run_start, numFrames - current_run_start});
+		}
+	}
+
+	return layout;
 }

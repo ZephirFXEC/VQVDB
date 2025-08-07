@@ -11,37 +11,37 @@
 #include <openvdb/openvdb.h>
 
 #include <string>
-#include <unsupported/Eigen/CXX11/Tensor>
 #include <vector>
 
-struct DenseBlock {
-	openvdb::Coord origin;
-	Eigen::Tensor<float, 3> data;
-};
+// --- This is the ONLY part we need for the initial loading ---
 
+/**
+ * @brief Represents a single frame in the sequence.
+ * For the initial analysis, it only needs to hold a pointer to the grid structure.
+ */
 struct VDBFrame {
-	std::vector<DenseBlock> blocks;
-	openvdb::FloatGrid::ConstPtr grid;
+	openvdb::FloatGrid::Ptr grid;
 };
 
-
-class VDBSequence {
-   public:
-	explicit VDBSequence(std::vector<VDBFrame> frames) : m_frames(std::move(frames)) {}
-	[[nodiscard]] const std::vector<VDBFrame>& frames() const noexcept { return m_frames; }
-	[[nodiscard]] size_t size() const noexcept { return m_frames.size(); }
-	[[nodiscard]] const VDBFrame& operator[](size_t i) const { return m_frames[i]; }
-
-   private:
-	std::vector<VDBFrame> m_frames;
+/**
+ * @brief A sequence of VDB frames.
+ */
+class VDBSequence : public std::vector<VDBFrame> {
+public:
+	using std::vector<VDBFrame>::vector; // Inherit constructors
 };
 
+// --- This loader will now be much simpler and more efficient ---
 
 class VDBLoader {
-   public:
-	explicit VDBLoader() = default;
+public:
+	/**
+	 * @brief Loads only the grid structure for a single frame.
+	 */
+	[[nodiscard]] VDBFrame loadFrame(const std::string& path, const std::string& gridName) const;
 
-	[[nodiscard]] VDBFrame loadFrame(const std::string& filePath, const std::string& gridName) const;
-
-	[[nodiscard]] VDBSequence loadSequence(const std::vector<std::string>& filePaths, const std::string& gridName) const;
+	/**
+	 * @brief Loads an entire sequence of grid structures.
+	 */
+	[[nodiscard]] VDBSequence loadSequence(const std::vector<std::string>& paths, const std::string& gridName) const;
 };

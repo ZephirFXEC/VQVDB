@@ -11,7 +11,6 @@
 #include <spdlog/spdlog.h>
 
 namespace logger {
-
 inline void init(bool verbose = false) {
 	static bool once = [] {
 		auto sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
@@ -31,17 +30,19 @@ template <typename... T>
 inline void debug(T&&... t) {
 	spdlog::debug(std::forward<T>(t)...);
 }
+
 template <typename... T>
 inline void info(T&&... t) {
 	spdlog::info(std::forward<T>(t)...);
 }
+
 template <typename... T>
 inline void warn(T&&... t) {
 	spdlog::warn(std::forward<T>(t)...);
 }
+
 template <typename... T>
 inline void error(T&&... t) {
 	spdlog::error(std::forward<T>(t)...);
 }
-
-}  // namespace logger
+} // namespace logger
