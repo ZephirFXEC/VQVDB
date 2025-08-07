@@ -45,3 +45,14 @@ public:
 	 */
 	[[nodiscard]] VDBSequence loadSequence(const std::vector<std::string>& paths, const std::string& gridName) const;
 };
+
+class VDBWriter {
+public:
+	/**
+	 * @brief Saves a sequence of VDB frames to disk.
+	 *
+	 * @param seq The sequence of frames to save.
+	 * @param outputPath The path where the sequence will be saved.
+	 */
+	static void saveSequence(const VDBSequence& seq, const std::string& outputPath);
+};

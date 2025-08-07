@@ -38,8 +38,8 @@ add_executable(DWTVDB
         Logger.hpp
         LeafActivityMask.hpp
         Wavelet.hpp
-        WaveletCompressor.cpp
-        WaveletCompressor.hpp
+        Compressor.hpp
+        Compressor.cpp
 )
 
 target_include_directories(DWTVDB PRIVATE ${POCKETFFT_INCLUDE_DIRS})

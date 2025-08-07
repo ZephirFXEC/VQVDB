@@ -11,24 +11,25 @@
 
 #include "LeafActivityMask.hpp"
 #include "Logger.hpp"
-#include "WaveletCompressor.hpp"
+#include "Compressor.hpp"
 
 int main(int argc, char** argv) {
 	openvdb::initialize();
 
 	cxxopts::Options cli("DWTVDB", "OpenVDB sequence compressor");
 
-	cli.add_options()("c,compress", "Compress mode", cxxopts::value<bool>())("d,decompress", "Decompress mode", cxxopts::value<bool>())(
-			"v,verbose", "Verbose / debug logging", cxxopts::value<bool>()->default_value("false"))(
-			"i,input", "Input pattern / file", cxxopts::value<std::string>())("o,output", "Output file / dir",
-			                                                                  cxxopts::value<std::string>())(
-			"s,start", "Start frame", cxxopts::value<int>()->default_value("0"))("e,end", "End frame", cxxopts::value<int>())(
-			"b,block", "Block size", cxxopts::value<int>()->default_value("8"))(
-			"g,grid", "Grid name", cxxopts::value<std::string>()->default_value("density"))("gop_size", "GOP Size",
-			                                                                                cxxopts::value<int>()->default_value("8"))
-		("approx_t", "Approximation threshold", cxxopts::value<float>()->default_value("0.1"))(
-			"detail_t", "Detail threshold", cxxopts::value<float>()->default_value("0.1"))(
-			"quant_bits", "Quantization bits", cxxopts::value<int>()->default_value("16"))
+	cli.add_options()
+		("c,compress", "Compress mode", cxxopts::value<bool>())("d,decompress", "Decompress mode", cxxopts::value<bool>())
+		("v,verbose", "Verbose / debug logging", cxxopts::value<bool>()->default_value("false"))
+		("i,input", "Input pattern / file", cxxopts::value<std::string>())
+		("o,output", "Output file / dir", cxxopts::value<std::string>())
+		("s,start", "Start frame", cxxopts::value<int>()->default_value("0"))
+		("e,end", "End frame", cxxopts::value<int>())
+		("b,block", "Block size", cxxopts::value<int>()->default_value("8"))
+		("g,grid", "Grid name", cxxopts::value<std::string>()->default_value("density"))
+		("q,qstep", "Quantization step", cxxopts::value<float>()->default_value("0.5"))
+		("gop_size", "GOP Size", cxxopts::value<int>()->default_value("8"))
+
 
 		("h,help", "Show help");
 
@@ -42,15 +43,11 @@ int main(int argc, char** argv) {
 		std::cout << cli.help() << '\n';
 	}
 
-	WaveletCompressor::Options opt{};
-	opt.block = args["block"].as<int>();
-	opt.gopSize = args["gop_size"].as<int>();
-	opt.gridName = args["grid"].as<std::string>();
-	opt.approx_threshold = args["approx_t"].as<float>();
-	opt.detail_threshold = args["detail_t"].as<float>();
-	opt.quantBits = args["quant_bits"].as<int>();
+	DCTCompressor::Params opt{};
+	opt.qstep = args["q"].as<float>();
 
-	WaveletCompressor comp(opt);
+
+	DCTCompressor comp(opt);
 
 	if (args["compress"].as<bool>()) {
 		int start = args["start"].as<int>();
@@ -69,7 +66,7 @@ int main(int argc, char** argv) {
 		logger::debug("Loaded {} frames from {} files", seq.size(), paths.size());
 
 		std::chrono::high_resolution_clock::time_point startTime = std::chrono::high_resolution_clock::now();
-		GOPLayout layout = GOPAnalyzer::analyze(seq, opt.gopSize);
+		GOPLayout layout = GOPAnalyzer::analyze(seq, args["gop_size"].as<int>());
 		logger::debug("GOP layout: {}", layout.toString());
 
 		std::chrono::high_resolution_clock::time_point endTime = std::chrono::high_resolution_clock::now();
@@ -87,10 +84,23 @@ int main(int argc, char** argv) {
 		}
 
 		std::chrono::high_resolution_clock::time_point startTime = std::chrono::high_resolution_clock::now();
-		comp.decompress(inFile, outDir);
+		VDBSequence out_seq = comp.decompress(inFile);
 		std::chrono::high_resolution_clock::time_point endTime = std::chrono::high_resolution_clock::now();
 		auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
 		logger::info("Decompression completed in {} ms", duration.count());
+
+		if (out_seq.empty()) {
+			logger::error("Decompression resulted in an empty sequence. Cannot save to VDB file.");
+			logger::info("This is expected if the original VDBs were empty or the compressed file was invalid.");
+			return 1;
+		} else {
+			logger::info("Decompression successful. Reconstructed {} frames.", out_seq.size());
+		}
+
+		logger::info("--- WRITING RECONSTRUCTED SEQUENCE TO DISK ---");
+		VDBWriter writer;
+		writer.saveSequence(out_seq, outDir);
+		logger::info("Successfully saved reconstructed sequence to '{}'", outDir);
 	} else {
 		std::cerr << "Specify --compress or --decompress\n";
 		return 1;
