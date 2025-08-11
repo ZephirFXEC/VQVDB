@@ -5,10 +5,11 @@
 #ifndef DWTVDB_COMPRESSIONBACKEND_HPP
 #define DWTVDB_COMPRESSIONBACKEND_HPP
 
-#include <vector>
-#include <stdexcept>
 #include <zlib.h>
+
+#include <stdexcept>
 #include <string>
+#include <vector>
 
 std::string zerr(int code) {
 	switch (code) {
@@ -52,4 +53,4 @@ std::vector<int16_t> zdecompress(const std::vector<char>& blob) {
 	return dst;
 }
 
-#endif //DWTVDB_COMPRESSIONBACKEND_HPP
+#endif  // DWTVDB_COMPRESSIONBACKEND_HPP

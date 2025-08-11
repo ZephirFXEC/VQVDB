@@ -44,6 +44,7 @@ add_executable(DWTVDB
         ThreadSafeQueue.hpp
         Pipeline.cpp
         Pipeline.hpp
+        CompressionStats.hpp
 )
 
 target_include_directories(DWTVDB PRIVATE ${POCKETFFT_INCLUDE_DIRS})

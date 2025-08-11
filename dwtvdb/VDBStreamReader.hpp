@@ -27,14 +27,14 @@ struct VDBFrame {
  * @brief A sequence of VDB frames.
  */
 class VDBSequence : public std::vector<VDBFrame> {
-public:
-	using std::vector<VDBFrame>::vector; // Inherit constructors
+   public:
+	using std::vector<VDBFrame>::vector;  // Inherit constructors
 };
 
 // --- This loader will now be much simpler and more efficient ---
 
 class VDBLoader {
-public:
+   public:
 	/**
 	 * @brief Loads only the grid structure for a single frame.
 	 */
@@ -47,7 +47,7 @@ public:
 };
 
 class VDBWriter {
-public:
+   public:
 	/**
 	 * @brief Saves a sequence of VDB frames to disk.
 	 *
@@ -59,12 +59,8 @@ public:
 
 
 class VDBStreamReader {
-public:
-	VDBStreamReader(std::vector<std::string> paths,
-	                std::string gridName)
-		: paths_(std::move(paths)),
-		  gridName_(std::move(gridName)) {
-	}
+   public:
+	VDBStreamReader(std::vector<std::string> paths, std::string gridName) : paths_(std::move(paths)), gridName_(std::move(gridName)) {}
 
 	// Number of frames available
 	int numFrames() const { return static_cast<int>(paths_.size()); }
@@ -76,7 +72,7 @@ public:
 
 	const std::vector<std::string>& paths() const { return paths_; }
 
-private:
+   private:
 	std::vector<std::string> paths_;
 	std::string gridName_;
 };

@@ -1,8 +1,8 @@
+#include <openvdb/openvdb.h>
+
 #include <cxxopts.hpp>
 #include <filesystem>
 #include <iostream>
-
-#include <openvdb/openvdb.h>
 
 #include "Compressor.hpp"
 #include "Logger.hpp"
@@ -14,31 +14,21 @@ int main(int argc, char** argv) {
 
 	cxxopts::Options cli("DWTVDB", "OpenVDB sequence compressor");
 
-	cli.add_options()
-		("c,compress", "Compress mode", cxxopts::value<bool>()->default_value("false"))
-		("d,decompress", "Decompress mode", cxxopts::value<bool>()->default_value("false"))
-		("v,verbose", "Verbose / debug logging",
-		 cxxopts::value<bool>()->default_value("false"))
-		("i,input", "Input pattern (compress) or file (decompress)",
-		 cxxopts::value<std::string>())
-		("o,output", "Output file (compress) or directory (decompress)",
-		 cxxopts::value<std::string>())
-		("s,start", "Start frame (compress)",
-		 cxxopts::value<int>()->default_value("0"))
-		("e,end", "End frame (compress)", cxxopts::value<int>())
-		("g,grid", "Grid name",
-		 cxxopts::value<std::string>()->default_value("density"))
-		("q,qstep", "Quantization step",
-		 cxxopts::value<float>()->default_value("0.5"))
-		("gop_size", "GOP size (target run size in pipeline)",
-		 cxxopts::value<int>()->default_value("16"))
-		("zstd", "Zstd compression level (1..22)",
-		 cxxopts::value<int>()->default_value("3"))
-		("loaders", "Number of loader threads",
-		 cxxopts::value<int>()->default_value("2"))
-		("compressors", "Number of compressor threads (0=auto)",
-		 cxxopts::value<int>()->default_value("0"))
-		("h,help", "Show help");
+	cli.add_options()("c,compress", "Compress mode", cxxopts::value<bool>()->default_value("false"))(
+	    "d,decompress", "Decompress mode", cxxopts::value<bool>()->default_value("false"))("v,verbose", "Verbose / debug logging",
+	                                                                                       cxxopts::value<bool>()->default_value("false"))(
+	    "i,input", "Input pattern (compress) or file (decompress)", cxxopts::value<std::string>())(
+	    "o,output", "Output file (compress) or directory (decompress)", cxxopts::value<std::string>())(
+	    "s,start", "Start frame (compress)", cxxopts::value<int>()->default_value("0"))(
+	    "e,end", "End frame (compress)", cxxopts::value<int>())("g,grid", "Grid name",
+	                                                            cxxopts::value<std::string>()->default_value("density"))(
+	    "q,qstep", "Quantization step", cxxopts::value<float>()->default_value("0.5"))("gop_size", "GOP size (target run size in pipeline)",
+	                                                                                   cxxopts::value<int>()->default_value("16"))(
+	    "zstd", "Zstd compression level (1..22)", cxxopts::value<int>()->default_value("3"))("loaders", "Number of loader threads",
+	                                                                                         cxxopts::value<int>()->default_value("2"))(
+	    "compressors", "Number of compressor threads (0=auto)", cxxopts::value<int>()->default_value("0"))(
+	    "cr, compression_ratio", "Target compression ratio (0.0 - 1.0, 1.0 means no compression)",
+	    cxxopts::value<float>()->default_value("0.5"))("h,help", "Show help");
 
 	auto args = cli.parse(argc, argv);
 
@@ -62,10 +52,8 @@ int main(int argc, char** argv) {
 	try {
 		if (doCompress) {
 			// Required args
-			if (!args.count("input") || !args.count("output") ||
-			    !args.count("end")) {
-				throw std::runtime_error(
-					"Compress mode requires --input, --output, --start, --end");
+			if (!args.count("input") || !args.count("output") || !args.count("end")) {
+				throw std::runtime_error("Compress mode requires --input, --output, --start, --end");
 			}
 
 			const std::string pattern = args["input"].as<std::string>();
@@ -78,6 +66,7 @@ int main(int argc, char** argv) {
 			const int zstdLevel = args["zstd"].as<int>();
 			int loaderThreads = args["loaders"].as<int>();
 			int compressorThreads = args["compressors"].as<int>();
+			float compressionRatio = args["cr"].as<float>();
 
 			if (start > end) {
 				throw std::runtime_error("--start must be <= --end");
@@ -115,7 +104,6 @@ int main(int argc, char** argv) {
 
 			DCTCompressor::Params dpar;
 			dpar.qstep = qstep;
-			dpar.zstdLevel = zstdLevel;
 
 			CompressorPipeline::Options popt;
 			popt.targetRunSize = gopSize;
@@ -127,51 +115,42 @@ int main(int argc, char** argv) {
 			const auto t0 = std::chrono::high_resolution_clock::now();
 			pipeline.run(reader, outputFile);
 			const auto t1 = std::chrono::high_resolution_clock::now();
-			const auto ms =
-				std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0)
-				.count();
+			const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
 			logger::info("Compression completed in {} ms", ms);
 		} else if (doDecompress) {
 			// Required args
 			if (!args.count("input") || !args.count("output")) {
-				throw std::runtime_error(
-					"Decompress mode requires --input and --output");
+				throw std::runtime_error("Decompress mode requires --input and --output");
 			}
 			const std::string inFile = args["input"].as<std::string>();
 			const std::string outDir = args["output"].as<std::string>();
 
 			if (outDir.empty()) {
-				throw std::runtime_error(
-					"Output directory must be specified for decompression.");
+				throw std::runtime_error("Output directory must be specified for decompression.");
 			}
 
 			// Ensure output directory exists
 			try {
 				std::filesystem::create_directories(outDir);
 			} catch (const std::filesystem::filesystem_error& e) {
-				logger::warn("Failed to create output directory '{}': {}", outDir,
-				             e.what());
+				logger::warn("Failed to create output directory '{}': {}", outDir, e.what());
 			}
 
 			// qstep is taken from file header during decode; we keep CLI qstep
 			// only to construct the object, but it will be overridden.
 			DCTCompressor::Params dpar;
 			dpar.qstep = args["q"].as<float>();
-			dpar.zstdLevel = args["zstd"].as<int>();
 			DCTCompressor comp(dpar);
 
 			const auto t0 = std::chrono::high_resolution_clock::now();
 			VDBSequence out_seq = comp.decompress(inFile);
 			const auto t1 = std::chrono::high_resolution_clock::now();
-			const auto ms =
-				std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0)
-				.count();
+			const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
 			logger::info("Decompression completed in {} ms", ms);
 
 			if (out_seq.empty()) {
 				logger::error("Decompression resulted in an empty sequence.");
-				logger::info(
-					"This can happen if the source was empty or the file was invalid.");
+				logger::info("This can happen if the source was empty or the file was invalid.");
 				return 1;
 			}
 

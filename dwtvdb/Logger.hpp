@@ -45,4 +45,4 @@ template <typename... T>
 inline void error(T&&... t) {
 	spdlog::error(std::forward<T>(t)...);
 }
-} // namespace logger
+}  // namespace logger

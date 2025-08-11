@@ -2,12 +2,12 @@
 
 #include <openvdb/io/File.h>
 
-#include <stdexcept>
-
-#include "logger.hpp"
 #include <filesystem>
 #include <iomanip>
 #include <sstream>
+#include <stdexcept>
+
+#include "logger.hpp"
 
 VDBFrame VDBLoader::loadFrame(const std::string& path, const std::string& gridName) const {
 	try {
@@ -102,12 +102,10 @@ void VDBWriter::saveSequence(const VDBSequence& seq, const std::string& outputPa
 }
 
 
-openvdb::FloatGrid::Ptr VDBStreamReader::readFrame(
-	const int index) const {
+openvdb::FloatGrid::Ptr VDBStreamReader::readFrame(const int index) const {
 	if (index < 0 || index >= numFrames()) {
 		std::ostringstream oss;
-		oss << "readFrame: index " << index << " out of range [0, "
-			<< (numFrames() - 1) << "]";
+		oss << "readFrame: index " << index << " out of range [0, " << (numFrames() - 1) << "]";
 		throw std::out_of_range(oss.str());
 	}
 
@@ -119,8 +117,7 @@ openvdb::FloatGrid::Ptr VDBStreamReader::readFrame(
 		if (!file.hasGrid(gridName_)) {
 			file.close();
 			std::ostringstream oss;
-			oss << "Grid '" << gridName_ << "' not found in file: "
-				<< path;
+			oss << "Grid '" << gridName_ << "' not found in file: " << path;
 			throw std::runtime_error(oss.str());
 		}
 
@@ -130,8 +127,7 @@ openvdb::FloatGrid::Ptr VDBStreamReader::readFrame(
 		auto grid = openvdb::gridPtrCast<openvdb::FloatGrid>(base);
 		if (!grid) {
 			std::ostringstream oss;
-			oss << "Grid '" << gridName_ << "' in '" << path
-				<< "' is not a FloatGrid.";
+			oss << "Grid '" << gridName_ << "' in '" << path << "' is not a FloatGrid.";
 			throw std::runtime_error(oss.str());
 		}
 		return grid;
@@ -142,8 +138,7 @@ openvdb::FloatGrid::Ptr VDBStreamReader::readFrame(
 		} catch (...) {
 		}
 		std::ostringstream oss;
-		oss << "OpenVDB I/O error loading file '" << path
-			<< "': " << e.what();
+		oss << "OpenVDB I/O error loading file '" << path << "': " << e.what();
 		throw std::runtime_error(oss.str());
 	}
 }

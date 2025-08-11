@@ -10,12 +10,12 @@
 #include <openvdb/openvdb.h>
 #include <openvdb/tools/GridTransformer.h>
 
-#include <algorithm> // Required for std::count
+#include <algorithm>  // Required for std::count
 #include <cassert>
 #include <map>
 #include <set>
-#include <string> // Required for std::string
-#include <sstream> // Required for std::stringstream
+#include <sstream>  // Required for std::stringstream
+#include <string>   // Required for std::string
 #include <utility>
 #include <vector>
 
@@ -29,18 +29,14 @@ struct array_view {
 
 	array_view() = default;
 
-	array_view(const T* p, const size_t c) : ptr(p), count(c) {
-	}
+	array_view(const T* p, const size_t c) : ptr(p), count(c) {}
 
 	template <size_t N>
-	explicit array_view(const T (&arr)[N]) : ptr(arr), count(N) {
-	}
+	explicit array_view(const T (&arr)[N]) : ptr(arr), count(N) {}
 
 	[[nodiscard]] const float* data() const { return ptr; }
 
-	[[nodiscard]] float* data() {
-		return const_cast<float*>(ptr);
-	}
+	[[nodiscard]] float* data() { return const_cast<float*>(ptr); }
 
 	[[nodiscard]] size_t size() const { return count; }
 };
@@ -60,8 +56,8 @@ struct RunDescriptor {
  *        Each leaf can have multiple runs across the sequence.
  */
 struct LeafRun {
-	RunDescriptor run;
-	std::vector<bool> presenceMask; // Mask within this specific run
+	RunDescriptor run{};
+	std::vector<bool> presenceMask;  // Mask within this specific run
 };
 
 /**
@@ -69,7 +65,7 @@ struct LeafRun {
  *        temporal grouping based on its actual presence pattern.
  */
 class GOPLayout {
-public:
+   public:
 	int targetRunSize = 0;
 	std::map<openvdb::Coord, std::vector<LeafRun>> leafRuns;
 
@@ -137,8 +133,7 @@ public:
 			ss << "Leaf at " << origin << ":\n";
 			for (size_t run_idx = 0; run_idx < runs.size(); ++run_idx) {
 				const auto& leaf_run = runs[run_idx];
-				ss << "  Run " << run_idx << " (Frames " << leaf_run.run.startFrame
-					<< "-" << leaf_run.run.endFrame() << "):\n";
+				ss << "  Run " << run_idx << " (Frames " << leaf_run.run.startFrame << "-" << leaf_run.run.endFrame() << "):\n";
 				ss << "    Presence: " << vectorBoolToString(leaf_run.presenceMask) << "\n";
 			}
 			ss << "\n";
@@ -168,7 +163,7 @@ public:
 		timelines.clear();
 
 		// Collect all unique runs
-		std::set<std::pair<int, int>> unique_runs; // (startFrame, numFrames)
+		std::set<std::pair<int, int>> unique_runs;  // (startFrame, numFrames)
 		for (const auto& [origin, runs] : leafRuns) {
 			for (const auto& leaf_run : runs) {
 				unique_runs.insert({leaf_run.run.startFrame, leaf_run.run.numFrames});
@@ -181,10 +176,7 @@ public:
 		}
 
 		// Sort GOPs by start frame
-		std::sort(gops.begin(), gops.end(),
-		          [](const GOPDescriptor& a, const GOPDescriptor& b) {
-			          return a.startFrame < b.startFrame;
-		          });
+		std::sort(gops.begin(), gops.end(), [](const GOPDescriptor& a, const GOPDescriptor& b) { return a.startFrame < b.startFrame; });
 
 		// Build timelines in GOP-centric format
 		for (const auto& [origin, runs] : leafRuns) {
@@ -193,11 +185,9 @@ public:
 
 			for (const auto& leaf_run : runs) {
 				// Find the GOP index for this run
-				auto it = std::find_if(gops.begin(), gops.end(),
-				                       [&](const GOPDescriptor& gop) {
-					                       return gop.startFrame == leaf_run.run.startFrame &&
-					                              gop.numFrames == leaf_run.run.numFrames;
-				                       });
+				auto it = std::find_if(gops.begin(), gops.end(), [&](const GOPDescriptor& gop) {
+					return gop.startFrame == leaf_run.run.startFrame && gop.numFrames == leaf_run.run.numFrames;
+				});
 
 				if (it != gops.end()) {
 					size_t gop_idx = std::distance(gops.begin(), it);
@@ -209,24 +199,23 @@ public:
 };
 
 class GOPAnalyzer {
-public:
+   public:
 	/**
 	 * @brief Analyzes a VDB sequence and creates leaf-specific temporal runs
 	 *        that maximize compression efficiency for each individual leaf.
 	 *
 	 * @param seq The input VDB sequence.
 	 * @param targetRunSize The target number of frames per run.
-	 * @param minRunSize Minimum run size (default: 4).
 	 * @param maxRunSize Maximum run size (default: targetRunSize * 2).
 	 * @return A GOPLayout object with optimized leaf-specific runs.
 	 */
-	[[nodiscard]] static GOPLayout analyze(const VDBSequence& seq, int targetRunSize = 16, int minRunSize = 4, int maxRunSize = -1);
+	[[nodiscard]] static GOPLayout analyze(const VDBSequence& seq, int targetRunSize = 16, int maxRunSize = -1);
 
-private:
+   private:
 	/**
 	 * @brief Find optimal runs for a single leaf based on its presence pattern.
 	 */
-	static std::vector<LeafRun> findOptimalRuns(const std::vector<bool>& presence, int targetRunSize, int minRunSize, int maxRunSize);
+	[[nodiscard]] static std::vector<LeafRun> findOptimalRuns(const std::vector<bool>& presence, int maxRunSize);
 };
 
 // ====================================================================
@@ -244,7 +233,7 @@ struct LeafBuffer {
  */
 struct LeafDataSeries {
 	openvdb::Coord origin;
-	std::vector<LeafBuffer> buffers; // Data only for present frames.
+	std::vector<LeafBuffer> buffers;  // Data only for present frames.
 };
 
 /**
@@ -261,65 +250,70 @@ struct GOPData {
 // IMPLEMENTATIONS
 // ====================================================================
 
-inline std::vector<LeafRun> GOPAnalyzer::findOptimalRuns(const std::vector<bool>& presence, int targetRunSize, int minRunSize,
-                                                         int maxRunSize) {
+/**
+ * @brief Finds optimal runs for a single leaf based on its presence pattern.
+ *        Splits long consecutive segments into chunks <= maxRunSize and includes
+ *        all segments >= minRunSize to avoid data loss.
+ *
+ * @param presence Boolean vector indicating leaf presence per frame.
+ * @param maxRunSize Maximum size per run (longer segments are split).
+ * @return Vector of LeafRun objects for this leaf.
+ */
+inline std::vector<LeafRun> GOPAnalyzer::findOptimalRuns(const std::vector<bool>& presence, int maxRunSize) {
 	std::vector<LeafRun> runs;
-	const int numFrames = static_cast<int>(presence.size());
+	const size_t numFrames = presence.size();
 
-	int i = 0;
+	size_t i = 0;
 	while (i < numFrames) {
 		// Skip frames where leaf is not present
 		while (i < numFrames && !presence[i]) {
-			i++;
+			++i;
 		}
 
 		if (i >= numFrames) break;
 
-		// Found start of a consecutive run
-		int runStart = i;
-		int runEnd = i;
-
-		// Extend run as long as leaf is present and we haven't exceeded maxRunSize
-		while (runEnd < numFrames && presence[runEnd] && (runEnd - runStart + 1) <= maxRunSize) {
-			runEnd++;
+		// Found start of a consecutive presence segment
+		size_t segmentStart = i;
+		size_t segmentEnd = i;
+		while (segmentEnd < numFrames && presence[segmentEnd]) {
+			++segmentEnd;
 		}
-		runEnd--; // runEnd is now the last frame where leaf is present
+		--segmentEnd;  // segmentEnd is now the last present frame
 
-		int runLength = runEnd - runStart + 1;
+		size_t segmentLength = segmentEnd - segmentStart + 1;
 
-		// If the run is too long, split it into smaller chunks
-		if (runLength > maxRunSize) {
-			int currentStart = runStart;
-			while (currentStart <= runEnd) {
-				int chunkEnd = std::min(currentStart + maxRunSize - 1, runEnd);
-				int chunkLength = chunkEnd - currentStart + 1;
+		// Process the entire segment by splitting into chunks <= maxRunSize
+		size_t currentStart = segmentStart;
+		while (currentStart <= segmentEnd) {
+			size_t remaining = segmentEnd - currentStart + 1;
+			size_t chunkSize = std::min(remaining, static_cast<size_t>(maxRunSize));
 
-				if (chunkLength >= minRunSize) {
-					LeafRun run;
-					run.run.startFrame = currentStart;
-					run.run.numFrames = chunkLength;
-					run.presenceMask.resize(chunkLength, true); // All frames in chunk are present
-					runs.push_back(run);
-				}
+			// Include the chunk if it's >=1 (to avoid data loss)
+			// Note: If you want to enforce minRunSize >1 strictly, you could skip here
+			// and log a warning, but that would reintroduce data loss—avoid unless padding/merging.
+			if (chunkSize >= 1) {
+				// Or >= minRunSize if enforcing, but prefer >=1
+				LeafRun run;
+				run.run.startFrame = static_cast<int>(currentStart);
+				run.run.numFrames = static_cast<int>(chunkSize);
+				run.presenceMask.assign(chunkSize, true);  // All frames in chunk are present
+				runs.push_back(run);
+			} /* else {
+			        // Optional: Log warning for dropped short chunk (but avoid dropping to fix bug)
+			        // e.g., logger::warn("Dropping short run of {} frames at {}", chunkSize, currentStart);
+			    } */
 
-				currentStart = chunkEnd + 1;
-			}
-		} else if (runLength >= minRunSize) {
-			// Run is acceptable size
-			LeafRun run;
-			run.run.startFrame = runStart;
-			run.run.numFrames = runLength;
-			run.presenceMask.resize(runLength, true); // All frames in run are present
-			runs.push_back(run);
+			currentStart += chunkSize;
 		}
 
-		i = runEnd + 1;
+		i = segmentEnd + 1;
 	}
 
 	return runs;
 }
 
-inline GOPLayout GOPAnalyzer::analyze(const VDBSequence& seq, const int targetRunSize, const int minRunSize, int maxRunSize) {
+
+inline GOPLayout GOPAnalyzer::analyze(const VDBSequence& seq, int targetRunSize, int maxRunSize) {
 	assert(targetRunSize > 0 && "Target run size must be positive.");
 	assert(minRunSize > 0 && "Minimum run size must be positive.");
 
@@ -374,7 +368,7 @@ inline GOPLayout GOPAnalyzer::analyze(const VDBSequence& seq, const int targetRu
 
 	// 2. Find optimal runs for each leaf independently
 	for (const auto& [origin, presence] : leaf_presence) {
-		std::vector<LeafRun> runs = findOptimalRuns(presence, targetRunSize, minRunSize, maxRunSize);
+		std::vector<LeafRun> runs = findOptimalRuns(presence, maxRunSize);
 		if (!runs.empty()) {
 			layout.leafRuns[origin] = runs;
 		}

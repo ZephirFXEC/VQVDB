@@ -5,18 +5,15 @@
 #ifndef DWTVDB_PIPELINE_HPP
 #define DWTVDB_PIPELINE_HPP
 
+#include <openvdb/openvdb.h>
+
 #include <atomic>
-#include <map>
 #include <memory>
 #include <thread>
 #include <unordered_map>
 #include <vector>
 
-#include <openvdb/openvdb.h>
-
 #include "Compressor.hpp"
-#include "FileFormat.hpp"
-#include "Logger.hpp"
 #include "ThreadSafeQueue.hpp"
 #include "VDBStreamReader.hpp"
 
@@ -35,37 +32,39 @@ struct GOPJob {
 };
 
 struct EncodedRunOut {
-	RunMetadata meta;
-	std::vector<char> blob;
-	std::vector<uint8_t> masks;
+	openvdb::Coord origin;
+	int32_t start_frame = 0;
+	int32_t num_frames = 0;
+
+	std::vector<uint8_t> masks;  // T * 64
+
+	struct V3 {
+		bool skip = false;
+		float adaptScale = 1.0f;
+		uint32_t nnz = 0;
+		std::vector<uint8_t> coeffMask;
+		std::vector<int16_t> coeffValues;
+	} v3;
 };
 
 class CompressorPipeline {
-public:
+   public:
 	struct Options {
 		int targetRunSize = 16;
 		int loaderThreads = 2;
-		int analyzerThreads = 1; // kept 1 for ordering correctness
-		int compressorThreads = std::max(1u,
-		                                 std::thread::hardware_concurrency());
+		int analyzerThreads = 1;  // kept 1 for ordering correctness
+		int compressorThreads = std::max(1u, std::thread::hardware_concurrency());
 		size_t frameQueueCapacity = 64;
 		size_t gopQueueCapacity = 8;
 		size_t outputQueueCapacity = 64;
 	};
 
-	CompressorPipeline(DCTCompressor::Params dctPar,
-	                   Options opts)
-		: comp_(dctPar),
-		  opts_(opts),
-		  frameQ_(opts.frameQueueCapacity),
-		  gopQ_(opts.gopQueueCapacity),
-		  outQ_(opts.outputQueueCapacity) {
-	}
+	CompressorPipeline(DCTCompressor::Params dctPar, Options opts)
+	    : comp_(dctPar), opts_(opts), frameQ_(opts.frameQueueCapacity), gopQ_(opts.gopQueueCapacity), outQ_(opts.outputQueueCapacity) {}
 
-	void run(VDBStreamReader& reader,
-	         const std::string& outputPath);
+	void run(VDBStreamReader& reader, const std::string& outputPath);
 
-private:
+   private:
 	DCTCompressor comp_;
 	Options opts_;
 
@@ -73,8 +72,7 @@ private:
 	ThreadSafeQueue<GOPJob> gopQ_;
 	ThreadSafeQueue<EncodedRunOut> outQ_;
 
-	void stageLoad(VDBStreamReader& reader, int threadId,
-	               std::atomic<int>& nextIndex);
+	void stageLoad(VDBStreamReader& reader, int threadId, std::atomic<int>& nextIndex);
 
 	void stageAnalyze(int totalFrames);
 
@@ -82,4 +80,4 @@ private:
 
 	void stageWrite(const std::string& outputPath);
 };
-#endif //DWTVDB_PIPELINE_HPP
+#endif  // DWTVDB_PIPELINE_HPP
