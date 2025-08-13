@@ -17,8 +17,26 @@
 
 #ifdef ENABLE_ONNX_BACKEND
 #include <windows.h>
+
 #include "backends/onnx/OnnxBackend_CPU.hpp"
 #include "backends/onnx/OnnxBackend_Cuda.hpp"
+
+std::filesystem::path fs_expand_from_executable_dir(const std::string& path_to_expand) noexcept {
+	char sz_path[MAX_PATH];
+
+	if (GetModuleFileNameA(nullptr, sz_path, MAX_PATH) == 0) {
+		std::cerr << "Error caught during GetModuleFileNameA: " << GetLastError() << std::endl;
+		return {};
+	}
+
+	std::size_t size = std::strlen(sz_path);
+
+	while (size > 0 && sz_path[size] != '\\') {
+		size--;
+	}
+
+	return std::string(sz_path, size) + "/" + path_to_expand;
+}
 
 void ManualInitOnnxRuntime(const std::string& dllPath) {
 	static HMODULE dllHandle = nullptr;
@@ -65,8 +83,7 @@ std::unique_ptr<IVQVAECodec> IVQVAECodec::create(const CodecConfig& config, Back
 
 #ifdef ENABLE_ONNX_BACKEND
 			case BackendType::ONNX: {
-				std::filesystem::path dllPath =
-				    std::filesystem::path("C:/Program Files/Side Effects Software/Houdini 20.5.613/bin/onnxruntime.dll");
+				const std::filesystem::path dllPath = fs_expand_from_executable_dir("onnxruntime.dll");
 
 				ManualInitOnnxRuntime(dllPath.string());
 

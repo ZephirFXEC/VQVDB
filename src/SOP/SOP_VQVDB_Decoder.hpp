@@ -64,3 +64,8 @@ class SOP_VQVDB_DecoderVerb final : public SOP_NodeVerb {
 	static const SOP_NodeVerb::Register<SOP_VQVDB_DecoderVerb> theVerb;
 	static const char* const theDsFile;
 };
+
+inline void newSopOperator_Decoder(OP_OperatorTable* table) {
+	table->addOperator(new OP_Operator("vqvdb_decoder", "VQVDB Decoder", SOP_VQVDB_Decoder::myConstructor,
+	                                   SOP_VQVDB_Decoder::buildTemplates(), 0, 0, nullptr, OP_FLAG_GENERATOR));
+}

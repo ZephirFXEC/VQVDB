@@ -155,12 +155,16 @@ houdini_generate_proto_headers(FILES
         "src/SOP/SOP_VQVDB_Decoder.cpp"
 )
 
-add_sop_library(SOP_VQVDB_Encoder
+# Create a SINGLE shared library for all VQ-VDB SOPs
+add_sop_library(SOP_VQVDB
+        # The new registration file
+        "src/SOP/SOP_Register.cpp"
+
+        # The Encoder files
         "src/SOP/SOP_VQVDB_Encoder.cpp"
         "src/SOP/SOP_VQVDB_Encoder.hpp"
-)
 
-add_sop_library(SOP_VQVDB_Decoder
+        # The Decoder files
         "src/SOP/SOP_VQVDB_Decoder.cpp"
         "src/SOP/SOP_VQVDB_Decoder.hpp"
 )
@@ -192,7 +196,7 @@ install(FILES "${LIBOMP_DLL_PATH}"
 
 install(CODE [[
     file(GET_RUNTIME_DEPENDENCIES
-         EXECUTABLES  $<TARGET_FILE:SOP_VQVDB_Encoder>
+         EXECUTABLES  $<TARGET_FILE:SOP_VQVDB>
          RESOLVED_DEPENDENCIES_VAR RESOLVED_DEPS
          UNRESOLVED_DEPENDENCIES_VAR UNRESOLVED_DEPS
          PRE_EXCLUDE_REGEXES "api-ms-" "ext-ms-" "hvsifiletrust" "pdmutilities" "aclui" "SOP_VQVDB"
@@ -223,5 +227,5 @@ install(FILES ${CUDA_DLLS}
 install(FILES ${CMAKE_SOURCE_DIR}/houdini_package/vqvdb.json
         DESTINATION houdini_package)
 
-install(FILES $<TARGET_FILE:SOP_VQVDB_Encoder> $<TARGET_FILE:SOP_VQVDB_Decoder>
+install(FILES $<TARGET_FILE:SOP_VQVDB> $<TARGET _FILE:SOP_VQVDB_Decoder>
         DESTINATION dso)

@@ -9,15 +9,9 @@
 #include "SOP_VQVDB_Decoder.hpp"
 
 #include <GU/GU_Detail.h>
-#include <UT/UT_DSOVersion.h>
 
 #include "../orchestrator/VQVAECodec.hpp"
 #include "Utils/Utils.hpp"
-
-void newSopOperator(OP_OperatorTable* table) {
-	table->addOperator(new OP_Operator("vqvdb_decoder", "VQVDB Decoder", SOP_VQVDB_Decoder::myConstructor,
-	                                   SOP_VQVDB_Decoder::buildTemplates(), 0, 0, nullptr, OP_FLAG_GENERATOR));
-}
 
 
 const char* const SOP_VQVDB_DecoderVerb::theDsFile = R"THEDSFILE(
