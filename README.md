@@ -8,13 +8,16 @@
 <br>
 
 <div align="center">
-  <a> <img src="https://github.com/user-attachments/assets/1f0bc6b6-ae5b-487f-a2cb-47bfffae0e0c"> </a>
+  <a> <img width="1920" height="1080" alt="GIT_COMPARE" src="https://github.com/user-attachments/assets/c0224438-6cb1-4ef2-8a77-f1931944b966"/> </a>
 </div>
 
 <div align="center">
   <h2> <a href=https://github.com/ZephirFXEC/VQVDB/releases/>Download the latest version</a> </h2>
 </div>
 
+<div align="center">
+  <a> <img width="1920" height="1080" alt="GIT_OVERVIEW" src="https://github.com/user-attachments/assets/9a48e38e-9874-4d2a-803a-69ada4765920" /> </a>
+</div>
 <div align="center">
   <h2> <a href=https://discord.gg/DgAhy9NHRH>Discord Support Community</a> </h2>
 </div>
