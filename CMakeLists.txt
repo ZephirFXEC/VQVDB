@@ -13,13 +13,18 @@ if(CMAKE_BUILD_TYPE MATCHES Release)
     if(MSVC)
         add_compile_options(/O2 /Ob2)
     else()
-        add_compile_options(-O3 -march=native)
+        # Use -O3 but make -march configurable for portability
+        add_compile_options(-O3)
+        if(ENABLE_NATIVE_OPTIMIZATION)
+            add_compile_options(-march=native)
+        endif()
     endif()
 endif()
 
 # ─────────── Build options ─────────────────────────────────────────────────
 option(ENABLE_TORCH_BACKEND "Build the LibTorch backend" OFF)
 option(ENABLE_ONNX_BACKEND "Build the ONNXRuntime backend" ON)
+option(ENABLE_NATIVE_OPTIMIZATION "Enable -march=native for CPU-specific optimizations (may reduce portability)" OFF)
 
 # ─────────── Houdini / OpenVDB ─────────────────────────────────────────────
 list(APPEND CMAKE_PREFIX_PATH "$ENV{HFS}/toolkit/cmake")
