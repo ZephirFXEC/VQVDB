@@ -3,6 +3,20 @@ project(VQVDB LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# ─────────── Optimization flags ────────────────────────────────────────────
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release)
+endif()
+
+# Enable optimizations for Release builds
+if(CMAKE_BUILD_TYPE MATCHES Release)
+    if(MSVC)
+        add_compile_options(/O2 /Ob2)
+    else()
+        add_compile_options(-O3 -march=native)
+    endif()
+endif()
+
 # ─────────── Build options ─────────────────────────────────────────────────
 option(ENABLE_TORCH_BACKEND "Build the LibTorch backend" OFF)
 option(ENABLE_ONNX_BACKEND "Build the ONNXRuntime backend" ON)
