@@ -4,3 +4,6 @@ vcpkg
 data
 cmake-build-release
 .venv
+__pycache__
+*.pyc
+*.pyo
