@@ -7,3 +7,7 @@ cmake-build-release
 __pycache__
 *.pyc
 *.pyo
+*.pyi
+.pytest_cache/
+.mypy_cache/
+.tox/
