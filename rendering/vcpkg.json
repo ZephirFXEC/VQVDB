@@ -1,0 +1,14 @@
+{
+  "name": "vqvdb-rendering-viewer",
+  "version-semver": "0.1.0",
+  "builtin-baseline": "25b458671af03578e6a34edd8f0d1ac85e084df4",
+  "dependencies": [
+    "glfw3",
+    "glad",
+    "glm",
+    {
+      "name": "imgui",
+      "features": ["glfw-binding", "opengl3-binding", "docking-experimental"]
+    }
+  ]
+}
