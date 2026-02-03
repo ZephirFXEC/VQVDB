@@ -4,7 +4,7 @@
 
 #include <glm/glm.hpp>
 
-#include "camera.hpp"
+#include "core/camera.hpp"
 
 // Input state for mouse/keyboard handling
 struct InputState {

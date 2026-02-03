@@ -1,6 +1,13 @@
-build
+/build
+/houdini_package
 install
 vcpkg
-data
-cmake-build-release
+/data
+/cmake*
+/models
+/python
 .venv
+*.md
+/.*
+/src/
+/python/

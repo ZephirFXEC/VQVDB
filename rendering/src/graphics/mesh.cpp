@@ -1,4 +1,4 @@
-#include "mesh.hpp"
+#include "graphics/mesh.hpp"
 
 namespace mesh {
 

@@ -1,13 +1,13 @@
-#include "app.hpp"
+#include "core/app.hpp"
 
-#include "camera.hpp"
-#include "gl_context.hpp"
-#include "input_controller.hpp"
-#include "render_loop.hpp"
-#include "renderer.hpp"
-#include "types.hpp"
-#include "ui.hpp"
-#include "window.hpp"
+#include "core/camera.hpp"
+#include "core/gl_context.hpp"
+#include "core/input_controller.hpp"
+#include "core/render_loop.hpp"
+#include "core/types.hpp"
+#include "core/window.hpp"
+#include "graphics/renderer.hpp"
+#include "ui/ui.hpp"
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>

@@ -23,17 +23,17 @@ find_package(glm CONFIG REQUIRED)
 find_package(imgui CONFIG REQUIRED)
 
 add_executable(vqvdb_rendering_viewer
-        src/main.cpp
-        src/app.cpp
-        src/window.cpp
-        src/gl_context.cpp
-        src/input_controller.cpp
-        src/render_loop.cpp
-        src/shader.cpp
-        src/mesh.cpp
-        src/primitives.cpp
-        src/renderer.cpp
-        src/ui.cpp
+        src/core/main.cpp
+        src/core/app.cpp
+        src/core/window.cpp
+        src/core/gl_context.cpp
+        src/core/input_controller.cpp
+        src/core/render_loop.cpp
+        src/graphics/shader.cpp
+        src/graphics/mesh.cpp
+        src/graphics/primitives.cpp
+        src/graphics/renderer.cpp
+        src/ui/ui.cpp
         src/vqvdb/vqvdb_types.cpp
         src/vqvdb/vqvdb_loader.cpp
 )

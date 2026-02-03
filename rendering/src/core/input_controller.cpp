@@ -1,8 +1,8 @@
-#include "input_controller.hpp"
+#include "core/input_controller.hpp"
 
-#include "camera.hpp"
-#include "types.hpp"
-#include "ui.hpp"
+#include "core/camera.hpp"
+#include "core/types.hpp"
+#include "ui/ui.hpp"
 
 #include <imgui_impl_glfw.h>
 

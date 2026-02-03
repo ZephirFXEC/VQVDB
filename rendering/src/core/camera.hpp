@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <glm/glm.hpp>
 
-#include "math_utils.hpp"
+#include "core/math_utils.hpp"
 
 // Data-oriented camera representation
 // Separates camera state (data) from operations (functions)

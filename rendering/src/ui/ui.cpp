@@ -1,4 +1,4 @@
-#include "ui.hpp"
+#include "ui/ui.hpp"
 
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
@@ -10,8 +10,8 @@
 #include <numeric>
 #include <sstream>
 
-#include "camera.hpp"
-#include "types.hpp"
+#include "core/camera.hpp"
+#include "core/types.hpp"
 #include "vqvdb/vqvdb_loader.hpp"
 
 namespace ui {

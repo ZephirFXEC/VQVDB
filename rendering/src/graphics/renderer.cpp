@@ -1,9 +1,9 @@
-#include "renderer.hpp"
+#include "graphics/renderer.hpp"
 
 #include <glm/gtc/type_ptr.hpp>
 #include <iostream>
 
-#include "primitives.hpp"
+#include "graphics/primitives.hpp"
 
 namespace renderer {
 

@@ -2,8 +2,8 @@
 
 #include <glm/glm.hpp>
 
-#include "mesh.hpp"
-#include "shader.hpp"
+#include "graphics/mesh.hpp"
+#include "graphics/shader.hpp"
 #include "vqvdb/vqvdb_types.hpp"
 
 // Scene renderer state - holds all GPU resources

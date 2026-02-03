@@ -1,4 +1,4 @@
-#include "gl_context.hpp"
+#include "core/gl_context.hpp"
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>

@@ -29,6 +29,8 @@ class OnnxBackendFactory : public IVQVAECodec {
 	OnnxBackendFactory& operator=(OnnxBackendFactory&&) = delete;
 
 	const std::vector<int64_t>& getLatentShape() const override { return latentShape_; }
+	std::vector<float> getCodebook() const override;
+	void getCodebookDims(int& numCodes, int& embeddingDim) const override;
 
    protected:
 	explicit OnnxBackendFactory();

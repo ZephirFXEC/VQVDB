@@ -1,4 +1,4 @@
-#include "render_loop.hpp"
+#include "core/render_loop.hpp"
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -21,11 +21,11 @@
 #include <glm/gtc/type_ptr.hpp>
 #include <string>
 
-#include "camera.hpp"
-#include "renderer.hpp"
-#include "types.hpp"
-#include "ui.hpp"
-#include "window.hpp"
+#include "core/camera.hpp"
+#include "core/types.hpp"
+#include "core/window.hpp"
+#include "graphics/renderer.hpp"
+#include "ui/ui.hpp"
 
 namespace {
 

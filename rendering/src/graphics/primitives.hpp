@@ -1,6 +1,6 @@
 #pragma once
 
-#include "mesh.hpp"
+#include "graphics/mesh.hpp"
 
 // Functions to generate primitive geometry data
 
