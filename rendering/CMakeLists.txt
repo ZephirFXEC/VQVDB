@@ -36,6 +36,8 @@ add_executable(vqvdb_rendering_viewer
         src/ui/ui.cpp
         src/vqvdb/vqvdb_types.cpp
         src/vqvdb/vqvdb_loader.cpp
+        src/vqvdb/codebook_loader.cpp
+        src/vqvdb/gpu_resources.cpp
 )
 
 target_link_libraries(vqvdb_rendering_viewer

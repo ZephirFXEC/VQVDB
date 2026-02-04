@@ -11,13 +11,129 @@
 
 #include <array>
 #include <cstdint>
+#include <expected>
+#include <glm/glm.hpp>
 #include <span>
 #include <string>
 #include <vector>
 
-#include <glm/glm.hpp>
-
 namespace vqvdb {
+
+// ============================================================================
+// Error Handling Infrastructure
+// ============================================================================
+
+/// Concept for error enum types that support errorToString
+template <typename E>
+concept ErrorEnum = std::is_enum_v<E>;
+
+/// Generic result type alias for any error enum
+template <typename T, ErrorEnum E>
+using Result = std::expected<T, E>;
+
+// ============================================================================
+// Error Enums
+// ============================================================================
+
+/// Error codes for GPU operations
+enum class GPUError { NotInitialized, AllocationFailed, UploadFailed, ReadbackFailed, VerificationFailed, InvalidData };
+
+/// Error codes for file loading operations
+enum class LoadError {
+	FileNotFound,
+	FileOpenFailed,
+	InvalidMagic,
+	UnsupportedVersion,
+	HeaderReadFailed,
+	GridMetadataReadFailed,
+	BlockDataReadFailed,
+	FileTruncated,
+	AllocationFailed,
+	InvalidData
+};
+
+/// Error codes for codebook operations
+enum class CodebookError { FileNotFound, FileOpenFailed, InvalidMagic, HeaderReadFailed, DataReadFailed, InvalidDimensions, FileTruncated };
+
+// ============================================================================
+// Error String Conversion (constexpr for compile-time evaluation)
+// ============================================================================
+
+[[nodiscard]] constexpr const char* errorToString(GPUError error) noexcept {
+	switch (error) {
+		case GPUError::NotInitialized:
+			return "GPU resources not initialized";
+		case GPUError::AllocationFailed:
+			return "GPU buffer allocation failed";
+		case GPUError::UploadFailed:
+			return "GPU data upload failed";
+		case GPUError::ReadbackFailed:
+			return "GPU data readback failed";
+		case GPUError::VerificationFailed:
+			return "GPU data verification failed";
+		case GPUError::InvalidData:
+			return "Invalid input data";
+	}
+	return "Unknown GPU error";
+}
+
+[[nodiscard]] constexpr const char* errorToString(LoadError error) noexcept {
+	switch (error) {
+		case LoadError::FileNotFound:
+			return "File not found";
+		case LoadError::FileOpenFailed:
+			return "Failed to open file";
+		case LoadError::InvalidMagic:
+			return "Invalid VQVDB magic number";
+		case LoadError::UnsupportedVersion:
+			return "Unsupported file version";
+		case LoadError::HeaderReadFailed:
+			return "Failed to read file header";
+		case LoadError::GridMetadataReadFailed:
+			return "Failed to read grid metadata";
+		case LoadError::BlockDataReadFailed:
+			return "Failed to read block data";
+		case LoadError::FileTruncated:
+			return "File appears to be truncated";
+		case LoadError::AllocationFailed:
+			return "Memory allocation failed";
+		case LoadError::InvalidData:
+			return "Invalid data in file";
+	}
+	return "Unknown load error";
+}
+
+[[nodiscard]] constexpr const char* errorToString(CodebookError error) noexcept {
+	switch (error) {
+		case CodebookError::FileNotFound:
+			return "Codebook file not found";
+		case CodebookError::FileOpenFailed:
+			return "Failed to open codebook file";
+		case CodebookError::InvalidMagic:
+			return "Invalid codebook magic number";
+		case CodebookError::HeaderReadFailed:
+			return "Failed to read codebook header";
+		case CodebookError::DataReadFailed:
+			return "Failed to read codebook data";
+		case CodebookError::InvalidDimensions:
+			return "Invalid codebook dimensions";
+		case CodebookError::FileTruncated:
+			return "Codebook file appears truncated";
+	}
+	return "Unknown codebook error";
+}
+
+// ============================================================================
+// Legacy Type Aliases (for backwards compatibility)
+// ============================================================================
+
+template <typename T>
+using LoadResult = Result<T, LoadError>;
+template <typename T>
+using GPUResult = Result<T, GPUError>;
+template <typename T>
+using CodebookResult = Result<T, CodebookError>;
+
 
 // ============================================================================
 // Constants
@@ -62,6 +178,49 @@ struct BlockOrigin {
 static_assert(sizeof(BlockOrigin) == 12, "BlockOrigin must be 12 bytes for file compatibility");
 
 // ============================================================================
+// Morton Code Encoding (for block spatial indexing)
+// ============================================================================
+
+/// Encode 3D integer coordinates into a 64-bit Morton code (Z-order curve)
+/// This provides cache-efficient spatial ordering for GPU block lookup
+[[nodiscard]] constexpr uint64_t encodeMorton64(int32_t x, int32_t y, int32_t z) noexcept {
+	// Convert signed to unsigned with offset (handle negative coords)
+	// Shift by 2^21 to handle coordinates in range [-2^21, 2^21)
+	constexpr uint32_t offset = 1u << 21;
+	const uint32_t ux = static_cast<uint32_t>(x + static_cast<int32_t>(offset));
+	const uint32_t uy = static_cast<uint32_t>(y + static_cast<int32_t>(offset));
+	const uint32_t uz = static_cast<uint32_t>(z + static_cast<int32_t>(offset));
+
+	// Helper lambda to expand bits with 2-bit gaps: 0b...xyz -> 0b...x00y00z00
+	auto expandBits = [](uint32_t v) -> uint64_t {
+		uint64_t x = v & 0x1FFFFFu;  // Only use 21 bits
+		x = (x | (x << 32)) & 0x1F00000000FFFFull;
+		x = (x | (x << 16)) & 0x1F0000FF0000FFull;
+		x = (x | (x << 8)) & 0x100F00F00F00F00Full;
+		x = (x | (x << 4)) & 0x10C30C30C30C30C3ull;
+		x = (x | (x << 2)) & 0x1249249249249249ull;
+		return x;
+	};
+
+	return expandBits(ux) | (expandBits(uy) << 1) | (expandBits(uz) << 2);
+}
+
+/// Encode a BlockOrigin into a 64-bit Morton code
+[[nodiscard]] constexpr uint64_t encodeMorton64(const BlockOrigin& origin) noexcept {
+	return encodeMorton64(origin.x, origin.y, origin.z);
+}
+
+/// Block metadata for GPU spatial lookup
+/// Stores morton code and index into the block data buffer
+struct BlockMetadata {
+	uint64_t mortonCode{0};  ///< Morton code for spatial ordering/lookup
+	uint32_t blockIndex{0};  ///< Index into block indices buffer
+	uint32_t padding{0};     ///< Padding for 16-byte alignment (std430)
+};
+
+static_assert(sizeof(BlockMetadata) == 16, "BlockMetadata must be 16 bytes for GPU alignment");
+
+// ============================================================================
 // Grid Transform
 // ============================================================================
 
@@ -95,9 +254,7 @@ struct AABB {
 
 	[[nodiscard]] constexpr glm::vec3 extents() const noexcept { return size() * 0.5f; }
 
-	[[nodiscard]] constexpr bool isValid() const noexcept {
-		return min.x <= max.x && min.y <= max.y && min.z <= max.z;
-	}
+	[[nodiscard]] constexpr bool isValid() const noexcept { return min.x <= max.x && min.y <= max.y && min.z <= max.z; }
 
 	/// Expand to include a point
 	void expand(const glm::vec3& point) noexcept;
@@ -171,25 +328,36 @@ struct BlockData {
 	[[nodiscard]] AABB computeWorldBounds(const GridTransform& transform) const noexcept;
 };
 
-// ============================================================================
-// Codebook (VQ Embedding Table)
-// ============================================================================
 
 /// VQ Codebook: maps indices → embedding vectors
 /// Shape: [numEmbeddings, embeddingDim] (e.g., 256 × 128)
+/// CPU-side codebook data loaded from file
 struct Codebook {
-	std::vector<float> data;
-	int32_t numEmbeddings{0};
-	int32_t embeddingDim{0};
+	std::vector<float> data;  ///< Row-major: [numEmbeddings][embeddingDim]
+	uint32_t numEmbeddings{0};
+	uint32_t embeddingDim{0};
 
-	[[nodiscard]] bool empty() const noexcept { return data.empty(); }
+	/// Check if codebook contains valid data
+	[[nodiscard]] bool isValid() const noexcept {
+		return numEmbeddings > 0 && embeddingDim > 0 && data.size() == static_cast<size_t>(numEmbeddings) * embeddingDim;
+	}
 
+	/// Get a pointer to a specific embedding vector
+	[[nodiscard]] const float* embedding(uint32_t index) const noexcept { return data.data() + static_cast<size_t>(index) * embeddingDim; }
+
+	/// Get a span view of a specific embedding vector
+	[[nodiscard]] std::span<const float> embeddingSpan(uint32_t index) const noexcept { return {embedding(index), embeddingDim}; }
+
+	/// Total size in bytes
 	[[nodiscard]] size_t sizeBytes() const noexcept { return data.size() * sizeof(float); }
 
-	/// Get embedding vector for a given index
-	[[nodiscard]] std::span<const float> embedding(uint8_t index) const noexcept {
-		const size_t offset = static_cast<size_t>(index) * embeddingDim;
-		return {data.data() + offset, static_cast<size_t>(embeddingDim)};
+	[[nodiscard]] bool empty() const noexcept { return numEmbeddings == 0 || embeddingDim == 0; }
+
+	/// Clear all data
+	void clear() noexcept {
+		data.clear();
+		numEmbeddings = 0;
+		embeddingDim = 0;
 	}
 };
 
@@ -250,9 +418,6 @@ struct VQVDBStats {
 	size_t codebookBytes{0};
 	AABB worldBounds;
 	float voxelSize{1.0f};
-
-	/// Print statistics to stdout
-	void print() const;
 };
 
 /// Compute statistics for a VQVDBFile

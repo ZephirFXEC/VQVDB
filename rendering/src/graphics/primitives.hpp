@@ -6,9 +6,9 @@
 
 namespace primitives {
 
-// Create a unit cube wireframe (edges only) centered at origin
-// Cube spans from (-0.5, -0.5, -0.5) to (0.5, 0.5, 0.5)
-[[nodiscard]] MeshData createWireframeCube(float r = 1.0f, float g = 1.0f, float b = 1.0f) noexcept;
+// Create a unit cube wireframe for instanced rendering
+// Cube spans from (0, 0, 0) to (1, 1, 1) - suitable for scaling by block size
+[[nodiscard]] MeshData createUnitCubeWireframe() noexcept;
 
 // Create a grid on the XZ plane centered at origin
 // gridSize: number of cells in each direction (total grid is 2*gridSize x 2*gridSize)

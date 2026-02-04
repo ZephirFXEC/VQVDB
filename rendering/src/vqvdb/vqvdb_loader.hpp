@@ -17,31 +17,6 @@
 namespace vqvdb {
 
 // ============================================================================
-// Error Handling
-// ============================================================================
-
-/// Error codes for VQVDB loading
-enum class LoadError {
-	FileNotFound,
-	FileOpenFailed,
-	InvalidMagic,
-	UnsupportedVersion,
-	HeaderReadFailed,
-	GridMetadataReadFailed,
-	BlockDataReadFailed,
-	FileTruncated,
-	AllocationFailed,
-	InvalidData
-};
-
-/// Convert error code to human-readable string
-[[nodiscard]] const char* errorToString(LoadError error) noexcept;
-
-/// Result type for load operations
-template <typename T>
-using LoadResult = std::expected<T, LoadError>;
-
-// ============================================================================
 // Loader Configuration
 // ============================================================================
 

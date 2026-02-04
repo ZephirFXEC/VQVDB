@@ -60,10 +60,12 @@ int App::run() {
 		window.destroy();
 		return EXIT_FAILURE;
 	}
-	
+
+	// Initialize GPU resources for VQVDB
+	ui::initGPUResources(uiState);
+
 	// Add welcome message to debug log
 	ui::logMessage(uiState, "VQVDB GPU Viewer initialized");
-	ui::logMessage(uiState, "Phase 0 complete - Ready for Phase 1");
 
 	auto inputController = std::make_unique<InputController>(cameraState, cameraLimits, input);
 	window.setUserPointer(inputController.get());
@@ -91,6 +93,7 @@ int App::run() {
 		window.pollEvents();
 	}
 
+	ui::shutdownGPUResources(uiState);
 	renderer::shutdown(rendererState);
 	ui::shutdown();
 	window.destroy();

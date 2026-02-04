@@ -16,12 +16,7 @@
 
 namespace vqvdb {
 
-// ============================================================================
-// File Format Structures (must match VQVDB_Reader.hpp exactly)
-// ============================================================================
-
 #pragma pack(push, 1)
-
 /// Main file header for v3 format (matches VQVDBFileHeader in VQVDB_Reader.hpp)
 struct FileHeaderV3 {
 	char magic[5];           // "VQVDB"
@@ -30,51 +25,16 @@ struct FileHeaderV3 {
 	uint32_t numEmbeddings;  // Codebook entries (typically 256)
 	uint8_t latentDimCount;  // Number of latent dimensions (typically 3)
 };
-
 static_assert(sizeof(FileHeaderV3) == 12, "FileHeaderV3 size mismatch");
 
 /// Per-grid header extension (transform matrix)
 struct HeaderExtension {
 	float transform[16];  // 4x4 matrix
 };
-
 static_assert(sizeof(HeaderExtension) == 64, "HeaderExtension size mismatch");
 
 #pragma pack(pop)
 
-// ============================================================================
-// Error Handling
-// ============================================================================
-
-const char* errorToString(LoadError error) noexcept {
-	switch (error) {
-		case LoadError::FileNotFound:
-			return "File not found";
-		case LoadError::FileOpenFailed:
-			return "Failed to open file";
-		case LoadError::InvalidMagic:
-			return "Invalid VQVDB magic number";
-		case LoadError::UnsupportedVersion:
-			return "Unsupported file version";
-		case LoadError::HeaderReadFailed:
-			return "Failed to read file header";
-		case LoadError::GridMetadataReadFailed:
-			return "Failed to read grid metadata";
-		case LoadError::BlockDataReadFailed:
-			return "Failed to read block data";
-		case LoadError::FileTruncated:
-			return "File appears to be truncated";
-		case LoadError::AllocationFailed:
-			return "Memory allocation failed";
-		case LoadError::InvalidData:
-			return "Invalid data in file";
-	}
-	return "Unknown error";
-}
-
-// ============================================================================
-// Internal Loader Class (matches VDBStreamReader pattern)
-// ============================================================================
 
 class VQVDBLoader {
    public:
@@ -95,7 +55,7 @@ class VQVDBLoader {
 		VQVDBFile result;
 		uint8_t numGrids = 0;
 
-		// Check for v3 format ("VQVDB" + version byte)
+		// Check for format ("VQVDB" + version byte)
 		if (std::string_view(magicBuf, 5) == "VQVDB") {
 			// v3 format - we already read 7 bytes, need to parse correctly
 			// magicBuf[5] = version, magicBuf[6] = numGrids

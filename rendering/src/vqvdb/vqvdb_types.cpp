@@ -9,11 +9,11 @@
 #include "vqvdb_types.hpp"
 
 #include <cmath>
-#include <iomanip>
 #include <iostream>
 #include <limits>
 
 namespace vqvdb {
+
 
 // ============================================================================
 // GridTransform Implementation
@@ -144,40 +144,6 @@ AABB VQVDBFile::combinedWorldBounds() const noexcept {
 // ============================================================================
 // VQVDBStats Implementation
 // ============================================================================
-
-void VQVDBStats::print() const {
-	std::cout << "\n";
-	std::cout << "╔══════════════════════════════════════════════════════════════╗\n";
-	std::cout << "║                    VQVDB File Statistics                     ║\n";
-	std::cout << "╠══════════════════════════════════════════════════════════════╣\n";
-
-	std::cout << "║ Grids:           " << std::setw(10) << totalGrids << std::setw(35) << " ║\n";
-	std::cout << "║ Total Blocks:    " << std::setw(10) << totalBlocks << std::setw(35) << " ║\n";
-
-	const float indexDataKB = static_cast<float>(indexDataBytes) / 1024.0f;
-	const float codebookKB = static_cast<float>(codebookBytes) / 1024.0f;
-
-	std::cout << std::fixed << std::setprecision(2);
-	std::cout << "║ Index Data:      " << std::setw(10) << indexDataKB << " KB" << std::setw(32) << " ║\n";
-	std::cout << "║ Codebook:        " << std::setw(10) << codebookKB << " KB" << std::setw(32) << " ║\n";
-	std::cout << "║ Voxel Size:      " << std::setw(10) << voxelSize << std::setw(35) << " ║\n";
-
-	std::cout << "╠══════════════════════════════════════════════════════════════╣\n";
-	std::cout << "║ World Bounds:                                                ║\n";
-
-	std::cout << std::fixed << std::setprecision(3);
-	std::cout << "║   Min: (" << std::setw(9) << worldBounds.min.x << ", " << std::setw(9) << worldBounds.min.y << ", " << std::setw(9)
-	          << worldBounds.min.z << ")" << std::setw(17) << " ║\n";
-	std::cout << "║   Max: (" << std::setw(9) << worldBounds.max.x << ", " << std::setw(9) << worldBounds.max.y << ", " << std::setw(9)
-	          << worldBounds.max.z << ")" << std::setw(17) << " ║\n";
-
-	const glm::vec3 size = worldBounds.size();
-	std::cout << "║   Size: (" << std::setw(8) << size.x << ", " << std::setw(8) << size.y << ", " << std::setw(8) << size.z << ")"
-	          << std::setw(17) << " ║\n";
-
-	std::cout << "╚══════════════════════════════════════════════════════════════╝\n";
-	std::cout << "\n";
-}
 
 VQVDBStats computeStats(const VQVDBFile& file) {
 	VQVDBStats stats;

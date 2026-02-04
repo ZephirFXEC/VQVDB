@@ -2,11 +2,9 @@
 
 #include <algorithm>
 #include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 
 #include "core/math_utils.hpp"
-
-// Data-oriented camera representation
-// Separates camera state (data) from operations (functions)
 
 struct CameraState {
 	// Orbit parameters

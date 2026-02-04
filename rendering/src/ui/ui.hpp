@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 
+#include "vqvdb/codebook_loader.hpp"
+#include "vqvdb/gpu_resources.hpp"
 #include "vqvdb/vqvdb_types.hpp"
 
 struct GLFWwindow;
@@ -41,10 +43,76 @@ struct VQVDBVolumeState {
 	}
 };
 
+// GPU Resources State - Milestone 1.2/1.3
+struct GPUResourcesState {
+	// GPU resources handle
+	vqvdb::GPUResources resources;
+
+	// Loaded codebook (CPU side, for verification)
+	std::optional<vqvdb::Codebook> codebook;
+	std::string codebookPath;
+
+	// Verification results
+	vqvdb::VerificationResult codebookVerification;
+	vqvdb::VerificationResult blockIndicesVerification;
+	vqvdb::VerificationResult blockMetadataVerification;
+
+	// Grid transform info for GPU instanced rendering
+	float voxelSize{1.0f};
+	float blockSize{8.0f};
+	bool rendererNeedsUpdate{false};  // Signal render loop to update renderer state
+
+	// Block display limit
+	int maxDisplayBlocks{0};    // 0 = show all blocks
+	bool useBlockLimit{false};  // Toggle for block limit
+
+	// State flags
+	bool codebookLoaded{false};
+	bool codebookUploaded{false};
+	bool codebookVerified{false};
+	bool blockIndicesUploaded{false};
+	bool blockIndicesVerified{false};
+	bool blockMetadataUploaded{false};
+	bool blockMetadataVerified{false};
+
+	// Error messages
+	std::string codebookError;
+	std::string blockDataError;
+
+	// Request flags (set by UI, processed by render loop)
+	bool codebookLoadRequested{false};
+	bool codebookVerifyRequested{false};
+	bool blockDataUploadRequested{false};
+	bool blockDataVerifyRequested{false};
+
+	void clear() noexcept {
+		codebook.reset();
+		codebookPath.clear();
+		codebookVerification = {};
+		blockIndicesVerification = {};
+		blockMetadataVerification = {};
+		voxelSize = 1.0f;
+		blockSize = 8.0f;
+		rendererNeedsUpdate = false;
+		maxDisplayBlocks = 0;
+		useBlockLimit = false;
+		codebookLoaded = false;
+		codebookUploaded = false;
+		codebookVerified = false;
+		blockIndicesUploaded = false;
+		blockIndicesVerified = false;
+		blockMetadataUploaded = false;
+		blockMetadataVerified = false;
+		codebookError.clear();
+		blockDataError.clear();
+	}
+};
+
 // UI State - holds all UI-related data
 struct UIState {
 	// Layout dimensions (computed each frame based on window size)
 	float leftPanelWidth{280.0f};
+	float rightPanelWidth{340.0f};
 	float bottomPanelHeight{180.0f};
 
 	// Viewport region (computed)
@@ -60,8 +128,11 @@ struct UIState {
 	// VQVDB volume data
 	VQVDBVolumeState volumeState;
 
+	// GPU resources (Milestone 1.2/1.3)
+	GPUResourcesState gpuState;
+
 	// Performance tracking
-	static constexpr size_t kMaxFrameSamples = 120;
+	static constexpr size_t kMaxFrameSamples = 60;
 	std::deque<float> frameTimes;
 	std::deque<float> fpsHistory;
 	size_t frameTimeIndex{0};
@@ -106,6 +177,25 @@ void logMessage(UIState& state, const std::string& message) noexcept;
 // Load a VQVDB file and update the volume state
 // Returns true on success, false on failure (error stored in volumeState.loadError)
 bool loadVQVDBFile(UIState& state, const std::string& filePath) noexcept;
+
+// Load a codebook file and upload to GPU (Milestone 1.2)
+// Returns true on success
+bool loadAndUploadCodebook(UIState& state, const std::string& filePath) noexcept;
+
+// Verify codebook data on GPU (Milestone 1.2)
+void verifyCodebookOnGPU(UIState& state) noexcept;
+
+// Upload block data to GPU (Milestone 1.3)
+bool uploadBlockDataToGPU(UIState& state) noexcept;
+
+// Verify block data on GPU (Milestone 1.3)
+void verifyBlockDataOnGPU(UIState& state) noexcept;
+
+// Initialize GPU resources (call after GL context is ready)
+void initGPUResources(UIState& state) noexcept;
+
+// Shutdown GPU resources
+void shutdownGPUResources(UIState& state) noexcept;
 
 // Check if mouse is over ImGui windows (for input blocking)
 [[nodiscard]] bool wantCaptureMouse() noexcept;

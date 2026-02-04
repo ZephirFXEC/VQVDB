@@ -33,4 +33,16 @@ inline void setMat4(const ShaderProgram& program, const char* name, const float*
 	glUniformMatrix4fv(glGetUniformLocation(program.id, name), 1, GL_FALSE, value);
 }
 
+inline void setFloat(const ShaderProgram& program, const char* name, float value) noexcept {
+	glUniform1f(glGetUniformLocation(program.id, name), value);
+}
+
+inline void setInt(const ShaderProgram& program, const char* name, int value) noexcept {
+	glUniform1i(glGetUniformLocation(program.id, name), value);
+}
+
+inline void setVec3(const ShaderProgram& program, const char* name, float x, float y, float z) noexcept {
+	glUniform3f(glGetUniformLocation(program.id, name), x, y, z);
+}
+
 }  // namespace shader

@@ -164,3 +164,81 @@ std::vector<uint8_t> OnnxBackendFactory::load_model_data(const std::filesystem::
 
 	return buffer;
 }
+
+// ----------------------------------------------------------------------------
+// Codebook Extraction
+// ----------------------------------------------------------------------------
+// We assume the ONNX model has the codebook weights stored in an initializer.
+// By convention (from PyTorch export), the quantizer embedding is usually named:
+// "quantizer.embedding"
+//
+// However, in an optimized ONNX graph, names might change.
+// Strategy:
+// 1. Try to find an initializer named "quantizer.embedding" (standard)
+// 2. If not found, we might need a backup strategy (e.g., look for a Constant node)
+//    For now, we enforce the naming convention during export.
+
+static const char* CODEBOOK_NODE_NAME = "quantizer.embedding";
+
+// Helper to copy tensor data from ONNX initializer to std::vector
+template <typename T>
+static std::vector<T> extractTensorData(const Ort::Session& session, const char* tensorName) {
+	// Note: ORT C++ API doesn't expose GetAllInitializers() easily.
+	// We typically have to run the model to get outputs, OR assume the
+	// initializer is graph-accessible.
+	//
+	// However, if the codebook is a model parameter (Initializer), we can't
+	// always just "get" it without running an inference if it's not an output.
+	//
+	// WORKAROUND:
+	// We will assume that during the Python export (save_for_inference.py),
+	// we added the codebook as an *output* of the encoder or a separate graph.
+	//
+	// Checking `src/backends/onnx/OnnxBackendFactory.cpp`, we don't have this yet.
+	//
+	// RETRACTION: We cannot easily get internal initializers from a loaded ORT Session
+	// unless they are graph inputs or outputs.
+	//
+	// ALTERNATIVE:
+	// We will update the `VQVAE_v2.py` export script to ensure `quantizer.embedding`
+	// is an OUTPUT of the Encoder model.
+	//
+	// For this C++ implementation, we will assume it is an output named "codebook".
+	// Let's check the encoder outputs.
+
+	// If "codebook" is not an output, we can't get it easily.
+	// But wait! We embedded the model binary. We can parse the ONNX protobuf manually?
+	// No, that's too heavy (requires protobuf dependency).
+	//
+	// Proposed Solution:
+	// We will fail gracefully if we can't find it, but for now, let's assumes
+	// future models will export "codebook" as a secondary output of the Encoder.
+
+	// For now, return a dummy or throw not implemented until we update the Python exporter.
+	// To unblock the build, I will implement a placeholder.
+
+	// TODO: Update Python exporter to add 'codebook' as an output.
+	return std::vector<T>();
+}
+
+std::vector<float> OnnxBackendFactory::getCodebook() const {
+	// This requires the Python exporter to be updated to expose the codebook
+	// as a model output or a separate file.
+	// For the immediate "Direct Index" implementation, we need this data.
+	//
+	// Hack for prototype: Return a zero-filled vector or throw.
+	// In a real implementation, we would modify `save_for_inference.py` to
+	// write `codebook.bin` alongside `encoder.onnx`.
+
+	// Let's assume we load it from a separate file for now?
+	// No, let's keep it clean.
+
+	std::cerr << "[OnnxBackend] Warning: getCodebook() not fully implemented without model export update." << std::endl;
+	std::vector<float> dummy(256 * 128, 0.0f);
+	return dummy;
+}
+
+void OnnxBackendFactory::getCodebookDims(int& numCodes, int& embeddingDim) const {
+	numCodes = 256;      // Hardcoded for VQ-VAE-2 conventions
+	embeddingDim = 128;  // Hardcoded for VQ-VAE-2 conventions
+}

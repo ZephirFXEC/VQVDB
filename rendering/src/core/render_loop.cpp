@@ -7,8 +7,8 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#include <windows.h>
 #include <commdlg.h>  // DO NOT INCLUDE BEFORE windows.h
+#include <windows.h>
 #endif
 
 #include <glad/glad.h>
@@ -82,15 +82,41 @@ void RenderLoop::drawFrame() {
 		}
 	}
 
-	// Update renderer if VQVDB file was loaded
-	if (uiRef.volumeState.needsRendererUpdate) {
-		uiRef.volumeState.needsRendererUpdate = false;
-		if (uiRef.volumeState.isLoaded && uiRef.volumeState.file.has_value()) {
-			renderer::updateBlockBBoxes(rendererRef, *uiRef.volumeState.file);
-		} else {
-			renderer::clearBlockBBoxes(rendererRef);
+	// Handle codebook load request (Milestone 1.2)
+	if (uiRef.gpuState.codebookLoadRequested) {
+		uiRef.gpuState.codebookLoadRequested = false;
+
+		std::string filePath = openFileDialog("Codebook Files (*.bin)\0*.bin\0All Files (*.*)\0*.*\0", "Open Codebook File");
+
+		if (!filePath.empty()) {
+			ui::loadAndUploadCodebook(uiRef, filePath);
 		}
 	}
+
+	// Handle codebook verify request (Milestone 1.2)
+	if (uiRef.gpuState.codebookVerifyRequested) {
+		uiRef.gpuState.codebookVerifyRequested = false;
+		ui::verifyCodebookOnGPU(uiRef);
+	}
+
+	// Handle block data upload request (Milestone 1.3)
+	if (uiRef.gpuState.blockDataUploadRequested) {
+		uiRef.gpuState.blockDataUploadRequested = false;
+		ui::uploadBlockDataToGPU(uiRef);
+	}
+
+	// Handle block data verify request (Milestone 1.3)
+	if (uiRef.gpuState.blockDataVerifyRequested) {
+		uiRef.gpuState.blockDataVerifyRequested = false;
+		ui::verifyBlockDataOnGPU(uiRef);
+	}
+
+	// Update renderer with grid transform if GPU data was uploaded (Milestone 1.4)
+	if (uiRef.gpuState.rendererNeedsUpdate) {
+		uiRef.gpuState.rendererNeedsUpdate = false;
+		renderer::setGridTransform(rendererRef, uiRef.gpuState.voxelSize, uiRef.gpuState.blockSize);
+	}
+
 	// Get window size for UI layout
 	int windowWidth, windowHeight;
 	glfwGetFramebufferSize(windowRef.raw(), &windowWidth, &windowHeight);
@@ -128,6 +154,17 @@ void RenderLoop::drawFrame() {
 
 	// Draw scene with current view-projection matrix
 	renderer::drawScene(rendererRef, cameraRef.viewProjectionMatrix);
+
+	// Draw block bboxes using GPU instancing if data is uploaded (Milestone 1.4)
+	// This replaces the CPU-generated bbox mesh when GPU data is available
+	if (uiRef.gpuState.blockIndicesUploaded && uiRef.gpuState.resources.hasBlockData()) {
+		// Compute block limit based on UI settings
+		size_t maxBlocks = 0;  // 0 = all blocks
+		if (uiRef.gpuState.useBlockLimit && uiRef.gpuState.maxDisplayBlocks > 0) {
+			maxBlocks = static_cast<size_t>(uiRef.gpuState.maxDisplayBlocks);
+		}
+		renderer::drawBlockBBoxesInstanced(rendererRef, uiRef.gpuState.resources, cameraRef.viewProjectionMatrix, maxBlocks);
+	}
 
 	// Disable scissor for UI rendering
 	glDisable(GL_SCISSOR_TEST);

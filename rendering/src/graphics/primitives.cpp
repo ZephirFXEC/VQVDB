@@ -2,12 +2,13 @@
 
 namespace primitives {
 
-MeshData createWireframeCube(float r, float g, float b) noexcept {
+MeshData createUnitCubeWireframe() noexcept {
 	MeshData data;
 	data.primitiveType = GL_LINES;
 
-	// 8 vertices of a unit cube centered at origin
-	const float h = 0.5f;  // half-size
+	// 8 vertices of a unit cube from (0,0,0) to (1,1,1)
+	// Color is white - will be overridden by instance shader
+	const float r = 1.0f, g = 1.0f, b = 1.0f;
 
 	// Vertices: 8 corners
 	//     6-------7
@@ -18,47 +19,35 @@ MeshData createWireframeCube(float r, float g, float b) noexcept {
 	//   0-------1
 
 	data.vertices = {
-	    // Bottom face (y = -h)
-	    {-h, -h, -h, r, g, b},  // 0: front-left-bottom
-	    {h, -h, -h, r, g, b},   // 1: front-right-bottom
-	    {-h, -h, h, r, g, b},   // 2: back-left-bottom
-	    {h, -h, h, r, g, b},    // 3: back-right-bottom
-	    // Top face (y = +h)
-	    {-h, h, -h, r, g, b},  // 4: front-left-top
-	    {h, h, -h, r, g, b},   // 5: front-right-top
-	    {-h, h, h, r, g, b},   // 6: back-left-top
-	    {h, h, h, r, g, b},    // 7: back-right-top
+	    // Bottom face (y = 0)
+	    {0.0f, 0.0f, 0.0f, r, g, b},  // 0: front-left-bottom
+	    {1.0f, 0.0f, 0.0f, r, g, b},  // 1: front-right-bottom
+	    {0.0f, 0.0f, 1.0f, r, g, b},  // 2: back-left-bottom
+	    {1.0f, 0.0f, 1.0f, r, g, b},  // 3: back-right-bottom
+	    // Top face (y = 1)
+	    {0.0f, 1.0f, 0.0f, r, g, b},  // 4: front-left-top
+	    {1.0f, 1.0f, 0.0f, r, g, b},  // 5: front-right-top
+	    {0.0f, 1.0f, 1.0f, r, g, b},  // 6: back-left-top
+	    {1.0f, 1.0f, 1.0f, r, g, b},  // 7: back-right-top
 	};
 
 	// 12 edges as line segments
 	data.indices = {
 	    // Bottom face edges
-	    0,
-	    1,  // front
-	    1,
-	    3,  // right
-	    3,
-	    2,  // back
-	    2,
-	    0,  // left
+	    0, 1,  // front
+	    1, 3,  // right
+	    3, 2,  // back
+	    2, 0,  // left
 	    // Top face edges
-	    4,
-	    5,  // front
-	    5,
-	    7,  // right
-	    7,
-	    6,  // back
-	    6,
-	    4,  // left
+	    4, 5,  // front
+	    5, 7,  // right
+	    7, 6,  // back
+	    6, 4,  // left
 	    // Vertical edges
-	    0,
-	    4,  // front-left
-	    1,
-	    5,  // front-right
-	    2,
-	    6,  // back-left
-	    3,
-	    7,  // back-right
+	    0, 4,  // front-left
+	    1, 5,  // front-right
+	    2, 6,  // back-left
+	    3, 7,  // back-right
 	};
 
 	return data;
