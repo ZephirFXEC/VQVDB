@@ -5,7 +5,6 @@
 #include "graphics/mesh.hpp"
 #include "graphics/shader.hpp"
 #include "vqvdb/gpu_resources.hpp"
-#include "vqvdb/vqvdb_types.hpp"
 
 // Scene renderer state - holds all GPU resources
 struct RendererState {
@@ -36,8 +35,8 @@ void drawScene(const RendererState& state, const glm::mat4& viewProjection) noex
 // Draw block bounding boxes using GPU instancing (Milestone 1.4)
 // Uses block origins SSBO for instanced rendering
 // @param maxBlocks Maximum number of blocks to render (0 = all blocks)
-void drawBlockBBoxesInstanced(const RendererState& state, const vqvdb::GPUResources& gpuResources,
-                               const glm::mat4& viewProjection, size_t maxBlocks = 0) noexcept;
+void drawBlockBBoxesInstanced(const RendererState& state, const vqvdb::GPUResources& gpuResources, const glm::mat4& viewProjection,
+                              size_t maxBlocks = 0) noexcept;
 
 // Update renderer with grid transform info for GPU instancing
 void setGridTransform(RendererState& state, float voxelSize, float blockSize = 8.0f) noexcept;
@@ -48,7 +47,7 @@ void setGridTransform(RendererState& state, float voxelSize, float blockSize = 8
 namespace shaders {
 
 constexpr const char* kLineVertexShader = R"(
-#version 450 core
+#version 460 core
 
 layout(location = 0) in vec3 aPosition;
 layout(location = 1) in vec3 aColor;
@@ -66,7 +65,7 @@ void main()
 )";
 
 constexpr const char* kLineFragmentShader = R"(
-#version 450 core
+#version 460 core
 
 in vec3 vColor;
 
@@ -80,7 +79,7 @@ void main()
 
 // Instanced block bounding box shader - reads origins from SSBO
 constexpr const char* kInstancedBBoxVertexShader = R"(
-#version 450 core
+#version 460 core
 
 // Unit cube vertex (local space, 0-1 range)
 layout(location = 0) in vec3 aPosition;
@@ -124,7 +123,7 @@ void main()
 )";
 
 constexpr const char* kInstancedBBoxFragmentShader = R"(
-#version 450 core
+#version 460 core
 
 in vec3 vColor;
 flat in int vInstanceID;

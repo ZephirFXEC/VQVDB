@@ -7,8 +7,8 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#include <commdlg.h>  // DO NOT INCLUDE BEFORE windows.h
 #include <windows.h>
+#include <commdlg.h>
 #endif
 
 #include <glad/glad.h>
@@ -22,6 +22,7 @@
 #include <string>
 
 #include "core/camera.hpp"
+#include "core/profiler.hpp"
 #include "core/types.hpp"
 #include "core/window.hpp"
 #include "graphics/renderer.hpp"
@@ -70,112 +71,140 @@ void RenderLoop::updateTiming() {
 
 void RenderLoop::drawFrame() {
 	updateTiming();
+	uiRef.profiler.setEnabled(uiRef.profilerEnabled && uiRef.profilerGathering);
+	uiRef.profiler.beginFrame();
 
-	// Handle file load request
-	if (uiRef.fileLoadRequested) {
-		uiRef.fileLoadRequested = false;
+	{
+		CPU_PROFILE_SCOPE(uiRef.profiler, "Frame");
 
-		std::string filePath = openFileDialog("VQVDB Files (*.vqvdb)\0*.vqvdb\0All Files (*.*)\0*.*\0", "Open VQVDB File");
+		{
+			CPU_PROFILE_SCOPE(uiRef.profiler, "Handle UI Requests");
 
-		if (!filePath.empty()) {
-			ui::loadVQVDBFile(uiRef, filePath);
+			// Handle file load request
+			if (uiRef.fileLoadRequested) {
+				uiRef.fileLoadRequested = false;
+
+				std::string filePath = openFileDialog("VQVDB Files (*.vqvdb)\0*.vqvdb\0All Files (*.*)\0*.*\0", "Open VQVDB File");
+
+				if (!filePath.empty()) {
+					ui::loadVQVDBFile(uiRef, filePath);
+				}
+			}
+
+			// Handle codebook load request (Milestone 1.2)
+			if (uiRef.gpuState.codebookLoadRequested) {
+				uiRef.gpuState.codebookLoadRequested = false;
+
+				std::string filePath = openFileDialog("Codebook Files (*.bin)\0*.bin\0All Files (*.*)\0*.*\0", "Open Codebook File");
+
+				if (!filePath.empty()) {
+					ui::loadAndUploadCodebook(uiRef, filePath);
+				}
+			}
+
+			// Handle codebook verify request (Milestone 1.2)
+			if (uiRef.gpuState.codebookVerifyRequested) {
+				uiRef.gpuState.codebookVerifyRequested = false;
+				ui::verifyCodebookOnGPU(uiRef);
+			}
+
+			// Handle block data upload request (Milestone 1.3)
+			if (uiRef.gpuState.blockDataUploadRequested) {
+				uiRef.gpuState.blockDataUploadRequested = false;
+				ui::uploadBlockDataToGPU(uiRef);
+			}
+
+			// Handle block data verify request (Milestone 1.3)
+			if (uiRef.gpuState.blockDataVerifyRequested) {
+				uiRef.gpuState.blockDataVerifyRequested = false;
+				ui::verifyBlockDataOnGPU(uiRef);
+			}
+
+			// Update renderer with grid transform if GPU data was uploaded (Milestone 1.4)
+			if (uiRef.gpuState.rendererNeedsUpdate) {
+				uiRef.gpuState.rendererNeedsUpdate = false;
+				renderer::setGridTransform(rendererRef, uiRef.gpuState.voxelSize, uiRef.gpuState.blockSize);
+			}
 		}
-	}
 
-	// Handle codebook load request (Milestone 1.2)
-	if (uiRef.gpuState.codebookLoadRequested) {
-		uiRef.gpuState.codebookLoadRequested = false;
+		// Get window size for UI layout
+		int windowWidth, windowHeight;
+		glfwGetFramebufferSize(windowRef.raw(), &windowWidth, &windowHeight);
 
-		std::string filePath = openFileDialog("Codebook Files (*.bin)\0*.bin\0All Files (*.*)\0*.*\0", "Open Codebook File");
-
-		if (!filePath.empty()) {
-			ui::loadAndUploadCodebook(uiRef, filePath);
+		{
+			CPU_PROFILE_SCOPE(uiRef.profiler, "Camera Update");
+			// Update camera with movement input
+			const glm::vec3 movementDir = getMovementDirection(inputRef);
+			camera::update(cameraRef, limitsRef, movementDir, timingRef.deltaTime);
 		}
-	}
 
-	// Handle codebook verify request (Milestone 1.2)
-	if (uiRef.gpuState.codebookVerifyRequested) {
-		uiRef.gpuState.codebookVerifyRequested = false;
-		ui::verifyCodebookOnGPU(uiRef);
-	}
+		{
+			CPU_PROFILE_SCOPE(uiRef.profiler, "Build UI");
+			// Begin ImGui frame
+			ui::beginFrame();
 
-	// Handle block data upload request (Milestone 1.3)
-	if (uiRef.gpuState.blockDataUploadRequested) {
-		uiRef.gpuState.blockDataUploadRequested = false;
-		ui::uploadBlockDataToGPU(uiRef);
-	}
-
-	// Handle block data verify request (Milestone 1.3)
-	if (uiRef.gpuState.blockDataVerifyRequested) {
-		uiRef.gpuState.blockDataVerifyRequested = false;
-		ui::verifyBlockDataOnGPU(uiRef);
-	}
-
-	// Update renderer with grid transform if GPU data was uploaded (Milestone 1.4)
-	if (uiRef.gpuState.rendererNeedsUpdate) {
-		uiRef.gpuState.rendererNeedsUpdate = false;
-		renderer::setGridTransform(rendererRef, uiRef.gpuState.voxelSize, uiRef.gpuState.blockSize);
-	}
-
-	// Get window size for UI layout
-	int windowWidth, windowHeight;
-	glfwGetFramebufferSize(windowRef.raw(), &windowWidth, &windowHeight);
-
-	// Update camera with movement input
-	const glm::vec3 movementDir = getMovementDirection(inputRef);
-	camera::update(cameraRef, limitsRef, movementDir, timingRef.deltaTime);
-
-	// Begin ImGui frame
-	ui::beginFrame();
-
-	// Render UI and get viewport dimensions
-	ui::renderUI(uiRef, cameraRef, limitsRef, timingRef, windowWidth, windowHeight);
-
-	// Update camera aspect ratio based on viewport (not full window)
-	camera::setAspectRatio(cameraRef, static_cast<float>(uiRef.viewportWidth), static_cast<float>(uiRef.viewportHeight));
-	camera::computeProjectionMatrix(cameraRef);
-	camera::computeViewProjectionMatrix(cameraRef);
-
-	// Clear the entire screen
-	glViewport(0, 0, windowWidth, windowHeight);
-	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-	// Set viewport to the UI-defined region (top-right area)
-	// Note: OpenGL viewport origin is bottom-left, so we need to flip Y
-	const int viewportY = windowHeight - uiRef.viewportY - uiRef.viewportHeight;
-	glViewport(uiRef.viewportX, viewportY, uiRef.viewportWidth, uiRef.viewportHeight);
-
-	// Enable scissor test to clip rendering to viewport
-	glEnable(GL_SCISSOR_TEST);
-	glScissor(uiRef.viewportX, viewportY, uiRef.viewportWidth, uiRef.viewportHeight);
-
-	// Enable depth testing for proper occlusion
-	glEnable(GL_DEPTH_TEST);
-
-	// Draw scene with current view-projection matrix
-	renderer::drawScene(rendererRef, cameraRef.viewProjectionMatrix);
-
-	// Draw block bboxes using GPU instancing if data is uploaded (Milestone 1.4)
-	// This replaces the CPU-generated bbox mesh when GPU data is available
-	if (uiRef.gpuState.blockIndicesUploaded && uiRef.gpuState.resources.hasBlockData()) {
-		// Compute block limit based on UI settings
-		size_t maxBlocks = 0;  // 0 = all blocks
-		if (uiRef.gpuState.useBlockLimit && uiRef.gpuState.maxDisplayBlocks > 0) {
-			maxBlocks = static_cast<size_t>(uiRef.gpuState.maxDisplayBlocks);
+			// Render UI and get viewport dimensions
+			ui::renderUI(uiRef, cameraRef, limitsRef, timingRef, windowWidth, windowHeight);
 		}
-		renderer::drawBlockBBoxesInstanced(rendererRef, uiRef.gpuState.resources, cameraRef.viewProjectionMatrix, maxBlocks);
+
+		// Update camera aspect ratio based on viewport (not full window)
+		camera::setAspectRatio(cameraRef, static_cast<float>(uiRef.viewportWidth), static_cast<float>(uiRef.viewportHeight));
+		camera::computeProjectionMatrix(cameraRef);
+		camera::computeViewProjectionMatrix(cameraRef);
+
+		{
+			CPU_PROFILE_SCOPE(uiRef.profiler, "Render 3D Scene");
+			// Clear the entire screen
+			glViewport(0, 0, windowWidth, windowHeight);
+			glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+			// Set viewport to the UI-defined region (top-right area)
+			// Note: OpenGL viewport origin is bottom-left, so we need to flip Y
+			const int viewportY = windowHeight - uiRef.viewportY - uiRef.viewportHeight;
+			glViewport(uiRef.viewportX, viewportY, uiRef.viewportWidth, uiRef.viewportHeight);
+
+			// Enable scissor test to clip rendering to viewport
+			glEnable(GL_SCISSOR_TEST);
+			glScissor(uiRef.viewportX, viewportY, uiRef.viewportWidth, uiRef.viewportHeight);
+
+			// Enable depth testing for proper occlusion
+			glEnable(GL_DEPTH_TEST);
+
+			{
+				GPU_PROFILE_SCOPE(uiRef.profiler, "Scene Draw");
+				renderer::drawScene(rendererRef, cameraRef.viewProjectionMatrix);
+			}
+
+			// Draw block bboxes using GPU instancing if data is uploaded (Milestone 1.4)
+			// This replaces the CPU-generated bbox mesh when GPU data is available
+			if (uiRef.gpuState.blockIndicesUploaded && uiRef.gpuState.resources.hasBlockData()) {
+				// Compute block limit based on UI settings
+				size_t maxBlocks = 0;  // 0 = all blocks
+				if (uiRef.gpuState.useBlockLimit && uiRef.gpuState.maxDisplayBlocks > 0) {
+					maxBlocks = static_cast<size_t>(uiRef.gpuState.maxDisplayBlocks);
+				}
+
+				GPU_PROFILE_SCOPE(uiRef.profiler, "Block BBoxes Draw");
+				renderer::drawBlockBBoxesInstanced(rendererRef, uiRef.gpuState.resources, cameraRef.viewProjectionMatrix, maxBlocks);
+			}
+
+			// Disable scissor for UI rendering
+			glDisable(GL_SCISSOR_TEST);
+
+			// Reset viewport for UI rendering
+			glViewport(0, 0, windowWidth, windowHeight);
+		}
+
+		{
+			CPU_PROFILE_SCOPE(uiRef.profiler, "Render ImGui");
+			GPU_PROFILE_SCOPE(uiRef.profiler, "ImGui Draw");
+			ui::endFrame();
+		}
+
+		updateTitle();
 	}
 
-	// Disable scissor for UI rendering
-	glDisable(GL_SCISSOR_TEST);
-
-	// Reset viewport for UI rendering
-	glViewport(0, 0, windowWidth, windowHeight);
-
-	// Render ImGui
-	ui::endFrame();
-
-	updateTitle();
+	uiRef.profiler.endFrame();
 }
 
 void RenderLoop::updateTitle() {

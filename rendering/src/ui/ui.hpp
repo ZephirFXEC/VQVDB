@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "core/profiler.hpp"
 #include "vqvdb/codebook_loader.hpp"
 #include "vqvdb/gpu_resources.hpp"
 #include "vqvdb/vqvdb_types.hpp"
@@ -120,6 +121,8 @@ struct UIState {
 	int viewportY{0};
 	int viewportWidth{1};
 	int viewportHeight{1};
+	bool viewportHovered{false};
+	bool viewportFocused{false};
 
 	// File loading
 	std::string loadedFilePath{"(No file loaded)"};
@@ -150,8 +153,16 @@ struct UIState {
 	// UI visibility toggles
 	bool showCameraInfo{true};
 	bool showPerformance{true};
+	bool showProfiler{true};
 	bool showDebugLog{true};
 	bool showPhase1Data{true};
+
+	// CPU/GPU profiler
+	profiler::Profiler profiler{};
+	bool profilerEnabled{true};
+	bool profilerGathering{true};
+	bool profilerFollowLatest{true};
+	int profilerSelectedClosedFrame{0};
 };
 
 namespace ui {

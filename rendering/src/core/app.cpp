@@ -93,6 +93,7 @@ int App::run() {
 		window.pollEvents();
 	}
 
+	uiState.profiler.shutdown();
 	ui::shutdownGPUResources(uiState);
 	renderer::shutdown(rendererState);
 	ui::shutdown();

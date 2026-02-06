@@ -3,6 +3,10 @@
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
+#include <imgui_internal.h>
+
+#define GLFW_INCLUDE_NONE
+#include <GLFW/glfw3.h>
 
 #include <algorithm>
 #include <chrono>
@@ -11,7 +15,9 @@
 #include <sstream>
 
 #include "core/camera.hpp"
+#include "core/profiler.hpp"
 #include "core/types.hpp"
+#include "ui/profiler_ui.hpp"
 #include "vqvdb/codebook_loader.hpp"
 #include "vqvdb/gpu_resources.hpp"
 #include "vqvdb/vqvdb_loader.hpp"
@@ -26,6 +32,16 @@ bool init(GLFWwindow* window) noexcept {
 	ImGuiIO& io = ImGui::GetIO();
 	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 	io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+	io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
+
+	// Use an explicitly configured default font atlas for crisper text.
+	io.Fonts->Clear();
+	ImFontConfig fontConfig;
+	fontConfig.OversampleH = 2;
+	fontConfig.OversampleV = 2;
+	fontConfig.PixelSnapH = false;
+	fontConfig.SizePixels = 13.0f;
+	io.Fonts->AddFontDefault(&fontConfig);
 
 	// Set up dark style
 	ImGui::StyleColorsDark();
@@ -37,6 +53,7 @@ bool init(GLFWwindow* window) noexcept {
 	style.FrameBorderSize = 0.0f;
 	style.PopupBorderSize = 1.0f;
 	style.AntiAliasedLines = true;
+	style.AntiAliasedFill = true;
 
 	// Customize colors for a more professional look
 	ImVec4* colors = style.Colors;
@@ -55,13 +72,18 @@ bool init(GLFWwindow* window) noexcept {
 	colors[ImGuiCol_PlotLines] = ImVec4(0.40f, 0.80f, 0.40f, 1.00f);
 	colors[ImGuiCol_PlotHistogram] = ImVec4(0.40f, 0.70f, 0.90f, 1.00f);
 
+	if ((io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable) != 0) {
+		style.WindowRounding = 2.0f;
+		style.Colors[ImGuiCol_WindowBg].w = 1.0f;
+	}
+
 	// Initialize platform/renderer backends
 	// Pass false to NOT install callbacks - we'll forward events manually
 	if (!ImGui_ImplGlfw_InitForOpenGL(window, false)) {
 		return false;
 	}
 
-	if (!ImGui_ImplOpenGL3_Init("#version 450")) {
+	if (!ImGui_ImplOpenGL3_Init("#version 460")) {
 		ImGui_ImplGlfw_Shutdown();
 		return false;
 	}
@@ -84,9 +106,37 @@ void beginFrame() noexcept {
 void endFrame() noexcept {
 	ImGui::Render();
 	ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
+	ImGuiIO& io = ImGui::GetIO();
+	if ((io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable) != 0) {
+		GLFWwindow* backupCurrentContext = glfwGetCurrentContext();
+		ImGui::UpdatePlatformWindows();
+		ImGui::RenderPlatformWindowsDefault();
+		glfwMakeContextCurrent(backupCurrentContext);
+	}
 }
 
 namespace {
+
+void beginDockspace() {
+	ImGuiViewport* viewport = ImGui::GetMainViewport();
+	ImGui::SetNextWindowPos(viewport->Pos);
+	ImGui::SetNextWindowSize(viewport->Size);
+	ImGui::SetNextWindowViewport(viewport->ID);
+
+	ImGuiWindowFlags hostFlags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
+	                             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus |
+	                             ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoDocking;
+
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+	ImGui::Begin("MainDockspaceHost", nullptr, hostFlags);
+	ImGui::PopStyleVar(2);
+
+	const ImGuiID dockspaceId = ImGui::GetID("MainDockspace");
+	ImGui::DockSpace(dockspaceId, ImVec2(0.0f, 0.0f), ImGuiDockNodeFlags_None);
+	ImGui::End();
+}
 
 void updatePerformanceStats(UIState& state, const Timing& timing) {
 	// Add current frame time
@@ -158,14 +208,9 @@ void sectionHeader(const char* label) {
 	ImGui::TextUnformatted(label);
 }
 
-void renderLeftPanel(UIState& state, CameraState& camera, CameraLimits& limits, int windowHeight) {
-	ImGui::SetNextWindowPos(ImVec2(0, 0));
-	ImGui::SetNextWindowSize(ImVec2(state.leftPanelWidth, static_cast<float>(windowHeight)));
-
-	ImGuiWindowFlags flags =
-	    ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus;
-
-	if (ImGui::Begin("Control Panel", nullptr, flags)) {
+void renderLeftPanel(UIState& state, CameraState& camera, CameraLimits& limits) {
+	ImGui::SetNextWindowSize(ImVec2(state.leftPanelWidth, 720.0f), ImGuiCond_FirstUseEver);
+	if (ImGui::Begin("Control Panel")) {
 		// === File / Data Section ===
 		if (ImGui::CollapsingHeader("Data & Files", ImGuiTreeNodeFlags_DefaultOpen)) {
 			const bool fileLoaded = state.volumeState.isLoaded;
@@ -256,8 +301,10 @@ void renderLeftPanel(UIState& state, CameraState& camera, CameraLimits& limits, 
 		if (ImGui::CollapsingHeader("Panels & Overlays", ImGuiTreeNodeFlags_DefaultOpen)) {
 			ImGui::Checkbox("Show Camera Overlay", &state.showCameraInfo);
 			ImGui::Checkbox("Show Performance Tab", &state.showPerformance);
+			ImGui::Checkbox("Show Profiler Tab", &state.showProfiler);
 			ImGui::Checkbox("Show Debug Log Tab", &state.showDebugLog);
 			ImGui::Checkbox("Show Dataset Tab", &state.showPhase1Data);
+			ImGui::Checkbox("Enable Profiler Instrumentation", &state.profilerEnabled);
 			ImGui::Separator();
 		}
 
@@ -270,17 +317,13 @@ void renderLeftPanel(UIState& state, CameraState& camera, CameraLimits& limits, 
 			ImGui::BulletText("Q/E: Move down/up");
 		}
 	}
+	state.leftPanelWidth = std::max(220.0f, ImGui::GetWindowWidth());
 	ImGui::End();
 }
 
-void renderGpuDebugPanel(UIState& state, int windowWidth, int windowHeight) {
-	ImGui::SetNextWindowPos(ImVec2(static_cast<float>(windowWidth) - state.rightPanelWidth, 0.0f));
-	ImGui::SetNextWindowSize(ImVec2(state.rightPanelWidth, static_cast<float>(windowHeight)));
-
-	ImGuiWindowFlags flags =
-	    ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus;
-
-	if (ImGui::Begin("GPU Debug", nullptr, flags)) {
+void renderGpuDebugPanel(UIState& state) {
+	ImGui::SetNextWindowSize(ImVec2(state.rightPanelWidth, 720.0f), ImGuiCond_FirstUseEver);
+	if (ImGui::Begin("GPU Debug")) {
 		auto& gpu = state.gpuState;
 		const auto memStats = vqvdb::getGPUMemoryStats(gpu.resources);
 		const bool cbReady = gpu.codebookUploaded;
@@ -387,20 +430,13 @@ void renderGpuDebugPanel(UIState& state, int windowWidth, int windowHeight) {
 			ImGui::TextColored(colorWarn(), "GPU errors are also shown above.");
 		}
 	}
+	state.rightPanelWidth = std::max(280.0f, ImGui::GetWindowWidth());
 	ImGui::End();
 }
 
-void renderBottomPanel(UIState& state, int windowWidth, int windowHeight) {
-	const float bottomY = static_cast<float>(windowHeight) - state.bottomPanelHeight;
-	const float width = std::max(1.0f, static_cast<float>(windowWidth) - state.leftPanelWidth - state.rightPanelWidth);
-
-	ImGui::SetNextWindowPos(ImVec2(state.leftPanelWidth, bottomY));
-	ImGui::SetNextWindowSize(ImVec2(width, state.bottomPanelHeight));
-
-	ImGuiWindowFlags flags =
-	    ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus;
-
-	if (ImGui::Begin("Info Panel", nullptr, flags)) {
+void renderBottomPanel(UIState& state) {
+	ImGui::SetNextWindowSize(ImVec2(1000.0f, state.bottomPanelHeight), ImGuiCond_FirstUseEver);
+	if (ImGui::Begin("Info Panel")) {
 		// Use tabs for different sections
 		if (ImGui::BeginTabBar("BottomTabs")) {
 			// === Performance Tab ===
@@ -422,6 +458,12 @@ void renderBottomPanel(UIState& state, int windowWidth, int windowHeight) {
 				}
 
 				ImGui::Columns(1);
+				ImGui::EndTabItem();
+			}
+
+			// === Profiler Tab ===
+			if (state.showProfiler && ImGui::BeginTabItem("Profiler")) {
+				profiler_ui::renderProfilerTab(state);
 				ImGui::EndTabItem();
 			}
 
@@ -516,13 +558,44 @@ void renderBottomPanel(UIState& state, int windowWidth, int windowHeight) {
 			ImGui::EndTabBar();
 		}
 	}
+	state.bottomPanelHeight = std::max(140.0f, ImGui::GetWindowHeight());
 	ImGui::End();
+}
+
+void renderViewportWindow(UIState& state) {
+	ImGui::SetNextWindowSize(ImVec2(1000.0f, 700.0f), ImGuiCond_FirstUseEver);
+	ImGuiWindowClass viewportClass;
+	viewportClass.ParentViewportId = ImGui::GetMainViewport()->ID;
+	ImGui::SetNextWindowClass(&viewportClass);
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+	constexpr ImGuiWindowFlags viewportFlags = ImGuiWindowFlags_NoBackground;
+	if (ImGui::Begin("Viewport", nullptr, viewportFlags)) {
+		state.viewportHovered = ImGui::IsWindowHovered();
+		state.viewportFocused = ImGui::IsWindowFocused();
+
+		const ImVec2 contentMin = ImGui::GetWindowContentRegionMin();
+		const ImVec2 contentMax = ImGui::GetWindowContentRegionMax();
+		const ImVec2 pos = ImGui::GetWindowPos();
+		const ImVec2 mainPos = ImGui::GetMainViewport()->Pos;
+
+		// Keep render viewport coordinates in main-window framebuffer space.
+		state.viewportX = static_cast<int>(pos.x + contentMin.x - mainPos.x);
+		state.viewportY = static_cast<int>(pos.y + contentMin.y - mainPos.y);
+		state.viewportWidth = std::max(1, static_cast<int>(contentMax.x - contentMin.x));
+		state.viewportHeight = std::max(1, static_cast<int>(contentMax.y - contentMin.y));
+	} else {
+		state.viewportHovered = false;
+		state.viewportFocused = false;
+	}
+	ImGui::End();
+	ImGui::PopStyleVar();
 }
 
 void renderViewportOverlay(const UIState& state, const CameraState& camera) {
 	// Optional: render a small overlay in the viewport corner
 	const float padding = 10.0f;
-	ImVec2 overlayPos(static_cast<float>(state.viewportX) + padding, static_cast<float>(state.viewportY) + padding);
+	const ImVec2 mainPos = ImGui::GetMainViewport()->Pos;
+	ImVec2 overlayPos(mainPos.x + static_cast<float>(state.viewportX) + padding, mainPos.y + static_cast<float>(state.viewportY) + padding);
 
 	ImGui::SetNextWindowPos(overlayPos);
 	ImGui::SetNextWindowBgAlpha(0.5f);
@@ -539,23 +612,19 @@ void renderViewportOverlay(const UIState& state, const CameraState& camera) {
 }  // namespace
 
 void renderUI(UIState& state, CameraState& camera, CameraLimits& limits, const Timing& timing, int windowWidth, int windowHeight) noexcept {
+	(void)windowWidth;
+	(void)windowHeight;
+
 	// Update performance stats
 	updatePerformanceStats(state, timing);
 
+	beginDockspace();
+
 	// Render UI panels
-	renderLeftPanel(state, camera, limits, windowHeight);
-	renderGpuDebugPanel(state, windowWidth, windowHeight);
-	renderBottomPanel(state, windowWidth, windowHeight);
-
-	// Compute viewport region (top-right area not covered by panels)
-	state.viewportX = static_cast<int>(state.leftPanelWidth);
-	state.viewportY = static_cast<int>(state.bottomPanelHeight);
-	state.viewportWidth = windowWidth - static_cast<int>(state.leftPanelWidth + state.rightPanelWidth);
-	state.viewportHeight = windowHeight - static_cast<int>(state.bottomPanelHeight);
-
-	// Ensure minimum viewport size
-	state.viewportWidth = std::max(state.viewportWidth, 1);
-	state.viewportHeight = std::max(state.viewportHeight, 1);
+	renderViewportWindow(state);
+	renderLeftPanel(state, camera, limits);
+	renderGpuDebugPanel(state);
+	renderBottomPanel(state);
 
 	// Render viewport overlay
 	if (state.showCameraInfo) {
@@ -642,7 +711,12 @@ bool loadAndUploadCodebook(UIState& state, const std::string& filePath) noexcept
 
 	// Upload to GPU
 	logMessage(state, "Uploading codebook to GPU...");
-	auto uploadResult = vqvdb::uploadCodebook(gpu.resources, *gpu.codebook);
+	vqvdb::GPUResult<void> uploadResult;
+	{
+		TRANSFER_PROFILE_SCOPE(state.profiler, "Transfer Codebook CPU->GPU", gpu.codebook->sizeBytes(),
+		                       profiler::TransferDirection::CPUToGPU);
+		uploadResult = vqvdb::uploadCodebook(gpu.resources, *gpu.codebook);
+	}
 	if (!uploadResult.has_value()) {
 		gpu.codebookError = std::format("GPU upload failed: {}", vqvdb::errorToString(uploadResult.error()));
 		logMessage(state, "ERROR: " + gpu.codebookError);
@@ -664,8 +738,11 @@ void verifyCodebookOnGPU(UIState& state) noexcept {
 	}
 
 	logMessage(state, "Verifying codebook on GPU via readback...");
-
-	gpu.codebookVerification = vqvdb::verifyCodebook(gpu.resources, *gpu.codebook);
+	{
+		TRANSFER_PROFILE_SCOPE(state.profiler, "Transfer Codebook GPU->CPU", gpu.codebook->sizeBytes(),
+		                       profiler::TransferDirection::GPUToCPU);
+		gpu.codebookVerification = vqvdb::verifyCodebook(gpu.resources, *gpu.codebook);
+	}
 	gpu.codebookVerified = true;
 
 	if (gpu.codebookVerification.passed) {
@@ -692,7 +769,12 @@ bool uploadBlockDataToGPU(UIState& state) noexcept {
 	logMessage(state, std::format("Uploading {} blocks ({} bytes) to GPU...", blocks.count(), blocks.indices.size()));
 
 	// Upload indices
-	auto indicesResult = vqvdb::uploadBlockIndices(gpu.resources, blocks);
+	vqvdb::GPUResult<void> indicesResult;
+	{
+		TRANSFER_PROFILE_SCOPE(state.profiler, "Transfer Block Indices CPU->GPU", blocks.indices.size(),
+		                       profiler::TransferDirection::CPUToGPU);
+		indicesResult = vqvdb::uploadBlockIndices(gpu.resources, blocks);
+	}
 	if (!indicesResult.has_value()) {
 		gpu.blockDataError = std::format("Indices upload failed: {}", vqvdb::errorToString(indicesResult.error()));
 		logMessage(state, "ERROR: " + gpu.blockDataError);
@@ -700,7 +782,12 @@ bool uploadBlockDataToGPU(UIState& state) noexcept {
 	}
 
 	// Upload origins
-	auto originsResult = vqvdb::uploadBlockOrigins(gpu.resources, blocks);
+	const size_t paddedOriginBytes = blocks.origins.size() * sizeof(int32_t) * 4;
+	vqvdb::GPUResult<void> originsResult;
+	{
+		TRANSFER_PROFILE_SCOPE(state.profiler, "Transfer Block Origins CPU->GPU", paddedOriginBytes, profiler::TransferDirection::CPUToGPU);
+		originsResult = vqvdb::uploadBlockOrigins(gpu.resources, blocks);
+	}
 	if (!originsResult.has_value()) {
 		gpu.blockDataError = std::format("Origins upload failed: {}", vqvdb::errorToString(originsResult.error()));
 		logMessage(state, "ERROR: " + gpu.blockDataError);
@@ -708,7 +795,12 @@ bool uploadBlockDataToGPU(UIState& state) noexcept {
 	}
 
 	// Upload block metadata with morton codes (Milestone 1.3)
-	auto metadataResult = vqvdb::uploadBlockMetadata(gpu.resources, blocks);
+	const size_t metadataBytes = blocks.origins.size() * sizeof(vqvdb::BlockMetadata);
+	vqvdb::GPUResult<void> metadataResult;
+	{
+		TRANSFER_PROFILE_SCOPE(state.profiler, "Transfer Block Metadata CPU->GPU", metadataBytes, profiler::TransferDirection::CPUToGPU);
+		metadataResult = vqvdb::uploadBlockMetadata(gpu.resources, blocks);
+	}
 	if (!metadataResult.has_value()) {
 		gpu.blockDataError = std::format("Metadata upload failed: {}", vqvdb::errorToString(metadataResult.error()));
 		logMessage(state, "ERROR: " + gpu.blockDataError);
@@ -752,8 +844,11 @@ void verifyBlockDataOnGPU(UIState& state) noexcept {
 
 	// Verify block indices
 	logMessage(state, "Verifying block indices on GPU via readback...");
-
-	gpu.blockIndicesVerification = vqvdb::verifyBlockIndices(gpu.resources, blocks);
+	{
+		TRANSFER_PROFILE_SCOPE(state.profiler, "Transfer Block Indices GPU->CPU", blocks.indices.size(),
+		                       profiler::TransferDirection::GPUToCPU);
+		gpu.blockIndicesVerification = vqvdb::verifyBlockIndices(gpu.resources, blocks);
+	}
 	gpu.blockIndicesVerified = true;
 
 	if (gpu.blockIndicesVerification.passed) {
@@ -765,8 +860,12 @@ void verifyBlockDataOnGPU(UIState& state) noexcept {
 	// Verify block metadata (morton codes)
 	if (gpu.blockMetadataUploaded) {
 		logMessage(state, "Verifying block metadata (morton codes) on GPU...");
-
-		gpu.blockMetadataVerification = vqvdb::verifyBlockMetadata(gpu.resources, blocks);
+		const size_t metadataBytes = blocks.origins.size() * sizeof(vqvdb::BlockMetadata);
+		{
+			TRANSFER_PROFILE_SCOPE(state.profiler, "Transfer Block Metadata GPU->CPU", metadataBytes,
+			                       profiler::TransferDirection::GPUToCPU);
+			gpu.blockMetadataVerification = vqvdb::verifyBlockMetadata(gpu.resources, blocks);
+		}
 		gpu.blockMetadataVerified = true;
 
 		if (gpu.blockMetadataVerification.passed) {
@@ -786,8 +885,30 @@ void initGPUResources(UIState& state) noexcept {
 
 void shutdownGPUResources(UIState& state) noexcept { vqvdb::shutdownGPUResources(state.gpuState.resources); }
 
-bool wantCaptureMouse() noexcept { return ImGui::GetIO().WantCaptureMouse; }
+bool wantCaptureMouse() noexcept {
+	// When the mouse is over the Viewport docked window, let the 3D camera
+	// handle input instead of ImGui.
+	if (ImGui::GetIO().WantCaptureMouse) {
+		// Check if the hovered window is the Viewport
+		ImGuiWindow* hovered = ImGui::GetCurrentContext()->HoveredWindow;
+		if (hovered && strcmp(hovered->Name, "Viewport") == 0) {
+			return false;
+		}
+		return true;
+	}
+	return false;
+}
 
-bool wantCaptureKeyboard() noexcept { return ImGui::GetIO().WantCaptureKeyboard; }
+bool wantCaptureKeyboard() noexcept {
+	if (ImGui::GetIO().WantCaptureKeyboard) {
+		// Allow keyboard input when the Viewport window is focused
+		ImGuiWindow* focused = ImGui::GetCurrentContext()->NavWindow;
+		if (focused && strcmp(focused->Name, "Viewport") == 0) {
+			return false;
+		}
+		return true;
+	}
+	return false;
+}
 
 }  // namespace ui

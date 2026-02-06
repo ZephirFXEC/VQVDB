@@ -28,12 +28,14 @@ add_executable(vqvdb_rendering_viewer
         src/core/window.cpp
         src/core/gl_context.cpp
         src/core/input_controller.cpp
+        src/core/profiler.cpp
         src/core/render_loop.cpp
         src/graphics/shader.cpp
         src/graphics/mesh.cpp
         src/graphics/primitives.cpp
         src/graphics/renderer.cpp
         src/ui/ui.cpp
+        src/ui/profiler_ui.cpp
         src/vqvdb/vqvdb_types.cpp
         src/vqvdb/vqvdb_loader.cpp
         src/vqvdb/codebook_loader.cpp
