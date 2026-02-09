@@ -10,6 +10,10 @@ namespace primitives {
 // Cube spans from (0, 0, 0) to (1, 1, 1) - suitable for scaling by block size
 [[nodiscard]] MeshData createUnitCubeWireframe() noexcept;
 
+// Create a unit cube triangle mesh for depth prepass
+// Cube spans from (0, 0, 0) to (1, 1, 1)
+[[nodiscard]] MeshData createUnitCubeSolid() noexcept;
+
 // Create a grid on the XZ plane centered at origin
 // gridSize: number of cells in each direction (total grid is 2*gridSize x 2*gridSize)
 // cellSize: size of each cell

@@ -164,6 +164,9 @@ class VQVDBLoader {
 		}
 		grid.blocks = std::move(*blocksResult);
 
+		// Pre-compute morton codes so the scheduler doesn't recalculate per frame.
+		grid.blocks.computeMortonCodes();
+
 		// Compute world bounds
 		grid.metadata.worldBounds = grid.blocks.computeWorldBounds(grid.metadata.transform);
 

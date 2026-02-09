@@ -55,6 +55,19 @@ enum class LoadError {
 /// Error codes for codebook operations
 enum class CodebookError { FileNotFound, FileOpenFailed, InvalidMagic, HeaderReadFailed, DataReadFailed, InvalidDimensions, FileTruncated };
 
+/// Error codes for decoder backend operations
+enum class DecoderError {
+	None,
+	EngineNotLoaded,
+	OnnxModelNotFound,
+	EngineBuildFailed,
+	EngineDeserializeFailed,
+	InferenceFailed,
+	CudaError,
+	InteropError,
+	InvalidInput
+};
+
 // ============================================================================
 // Error String Conversion (constexpr for compile-time evaluation)
 // ============================================================================
@@ -123,6 +136,28 @@ enum class CodebookError { FileNotFound, FileOpenFailed, InvalidMagic, HeaderRea
 	return "Unknown codebook error";
 }
 
+[[nodiscard]] constexpr const char* errorToString(DecoderError error) noexcept {
+	switch (error) {
+		case DecoderError::EngineNotLoaded:
+			return "Decoder engine not loaded";
+		case DecoderError::OnnxModelNotFound:
+			return "ONNX decoder model not found";
+		case DecoderError::EngineBuildFailed:
+			return "Failed to build decoder engine";
+		case DecoderError::EngineDeserializeFailed:
+			return "Failed to deserialize decoder engine";
+		case DecoderError::InferenceFailed:
+			return "Decoder inference failed";
+		case DecoderError::CudaError:
+			return "CUDA operation failed";
+		case DecoderError::InteropError:
+			return "CUDA/OpenGL interop failed";
+		case DecoderError::InvalidInput:
+			return "Invalid decoder input";
+	}
+	return "Unknown decoder error";
+}
+
 // ============================================================================
 // Legacy Type Aliases (for backwards compatibility)
 // ============================================================================
@@ -133,6 +168,8 @@ template <typename T>
 using GPUResult = Result<T, GPUError>;
 template <typename T>
 using CodebookResult = Result<T, CodebookError>;
+template <typename T>
+using DecoderResult = Result<T, DecoderError>;
 
 
 // ============================================================================
@@ -206,9 +243,7 @@ static_assert(sizeof(BlockOrigin) == 12, "BlockOrigin must be 12 bytes for file 
 }
 
 /// Encode a BlockOrigin into a 64-bit Morton code
-[[nodiscard]] constexpr uint64_t encodeMorton64(const BlockOrigin& origin) noexcept {
-	return encodeMorton64(origin.x, origin.y, origin.z);
-}
+[[nodiscard]] constexpr uint64_t encodeMorton64(const BlockOrigin& origin) noexcept { return encodeMorton64(origin.x, origin.y, origin.z); }
 
 /// Block metadata for GPU spatial lookup
 /// Stores morton code and index into the block data buffer
@@ -297,6 +332,11 @@ struct BlockData {
 	/// Layout: [block0_indices(64)] [block1_indices(64)] ...
 	std::vector<uint8_t> indices;
 
+	/// Pre-computed morton codes (N entries, one per block).
+	/// Populated once at load time by computeMortonCodes() to avoid
+	/// per-frame recomputation in the scheduler.
+	std::vector<uint64_t> mortonCodes;
+
 	/// Number of blocks
 	[[nodiscard]] size_t count() const noexcept { return origins.size(); }
 
@@ -313,12 +353,30 @@ struct BlockData {
 	void reserve(size_t numBlocks) {
 		origins.reserve(numBlocks);
 		indices.reserve(numBlocks * kIndicesPerBlock);
+		mortonCodes.reserve(numBlocks);
 	}
 
 	/// Clear all data
 	void clear() noexcept {
 		origins.clear();
 		indices.clear();
+		mortonCodes.clear();
+	}
+
+	/// Compute and cache morton codes from origins. Call once after loading.
+	void computeMortonCodes() {
+		mortonCodes.resize(origins.size());
+		for (size_t i = 0; i < origins.size(); ++i) {
+			mortonCodes[i] = encodeMorton64(origins[i]);
+		}
+	}
+
+	/// Get the morton code for a block (falls back to computing if not cached).
+	[[nodiscard]] uint64_t mortonCode(size_t blockIdx) const noexcept {
+		if (blockIdx < mortonCodes.size()) {
+			return mortonCodes[blockIdx];
+		}
+		return encodeMorton64(origins[blockIdx]);
 	}
 
 	/// Compute the axis-aligned bounding box in index space

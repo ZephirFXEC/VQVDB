@@ -16,9 +16,12 @@
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <glm/gtc/type_ptr.hpp>
+#include <limits>
 #include <string>
 
 #include "core/camera.hpp"
@@ -27,6 +30,7 @@
 #include "core/window.hpp"
 #include "graphics/renderer.hpp"
 #include "ui/ui.hpp"
+#include "vqvdb/scheduler.hpp"
 
 namespace {
 
@@ -67,6 +71,130 @@ void RenderLoop::updateTiming() {
 	timingRef.deltaTime = duration.count();
 	timingRef.lastFrameTime = now;
 	timingRef.frameCount++;
+}
+
+void RenderLoop::resetVisibilityStats() noexcept {
+	auto& gpu = uiRef.gpuState;
+	gpu.schedulerError.clear();
+	gpu.visibleBlocksLastFrame = 0;
+	gpu.visibleCachedLastFrame = 0;
+	gpu.visibleMissingLastFrame = 0;
+	gpu.scheduledDecodesLastFrame = 0;
+	gpu.occludedRequestsLastFrame = 0;
+	gpu.cacheTouchedLastFrame = 0;
+	gpu.cacheInsertedLastFrame = 0;
+	gpu.cacheEvictedLastFrame = 0;
+}
+
+void RenderLoop::clearVisibilityDebugState() noexcept {
+	blockDebugStates.clear();
+	renderer::clearBlockDebugStates(rendererRef);
+}
+
+void RenderLoop::updateVisibilityAndCache() {
+	auto& gpu = uiRef.gpuState;
+	resetVisibilityStats();
+
+	if (!uiRef.volumeState.isLoaded || !uiRef.volumeState.file.has_value() || uiRef.volumeState.file->grids.empty()) {
+		clearVisibilityDebugState();
+		return;
+	}
+
+	const auto& grid = uiRef.volumeState.file->grids[0];
+	const size_t totalBlocks = grid.blocks.count();
+	if (totalBlocks == 0) {
+		clearVisibilityDebugState();
+		return;
+	}
+
+	// Reuse existing allocation when block count hasn't changed.
+	if (lastDebugStateBlockCount != totalBlocks) {
+		blockDebugStates.assign(totalBlocks, static_cast<uint32_t>(vqvdb::BlockDebugState::NotVisible));
+		lastDebugStateBlockCount = totalBlocks;
+	} else {
+		std::memset(blockDebugStates.data(), 0, totalBlocks * sizeof(uint32_t));
+	}
+
+	vqvdb::SchedulerConfig config{};
+	config.maxDecodesPerFrame = static_cast<uint32_t>(std::max(0, gpu.decodeBudgetPerFrame));
+	config.maxDecodeDistance =
+	    (gpu.maxDecodeDistance <= 0.0f) ? std::numeric_limits<float>::infinity() : std::max(0.0f, gpu.maxDecodeDistance);
+	config.frustumCullingEnabled = gpu.enableFrustumCulling;
+
+	// Pass depth pyramid directly to the scheduler so occlusion is tested inline
+	// (avoids a second pass + allocation for the filtered vector).
+	if (gpu.enableDepthOcclusion && previousDepthPyramid.valid()) {
+		config.depthPyramid = &previousDepthPyramid;
+		config.occlusionDepthBias = gpu.occlusionDepthBias;
+	}
+
+	const vqvdb::BrickCache* cacheView = gpu.brickCacheInitialized ? &gpu.brickCache : nullptr;
+	vqvdb::ScheduleResult schedule =
+	    vqvdb::scheduleDecodes(grid.blocks, grid.metadata.transform, cameraRef.viewProjectionMatrix, cameraRef.position, cacheView, config);
+
+	gpu.occludedRequestsLastFrame = schedule.occludedCount;
+	gpu.scheduledDecodesLastFrame = static_cast<uint32_t>(schedule.decodeRequests.size());
+
+	if (gpu.brickCacheInitialized && gpu.autoUpdateVisibleCache) {
+		const auto cacheUpdate = vqvdb::updateCacheFromVisibleSet(gpu.brickCache, schedule.visibleBlocks, schedule.decodeRequests);
+		if (!cacheUpdate.has_value()) {
+			gpu.schedulerError = std::string("Cache update failed: ") + vqvdb::errorToString(cacheUpdate.error());
+		} else {
+			gpu.cacheTouchedLastFrame = cacheUpdate->touchedVisibleCached;
+			gpu.cacheInsertedLastFrame = cacheUpdate->inserted;
+			gpu.cacheEvictedLastFrame = cacheUpdate->evicted;
+		}
+	}
+
+	// Build debug states from the scheduler's visible set.
+	// Use the VisibleBlock::cached flag directly — it was set by the scheduler's cache check.
+	// After cache update, newly-inserted blocks are also cached, so re-check for those.
+	for (const vqvdb::VisibleBlock& visible : schedule.visibleBlocks) {
+		if (visible.blockIndex >= blockDebugStates.size()) {
+			continue;
+		}
+
+		const bool cachedNow = visible.cached ||
+		    (gpu.brickCacheInitialized && gpu.brickCache.mortonToSlot.contains(visible.mortonCode));
+
+		blockDebugStates[visible.blockIndex] = static_cast<uint32_t>(cachedNow ? vqvdb::BlockDebugState::VisibleCached
+		                                                                        : vqvdb::BlockDebugState::VisibleMissing);
+		if (cachedNow) {
+			++gpu.visibleCachedLastFrame;
+		} else {
+			++gpu.visibleMissingLastFrame;
+		}
+	}
+
+	gpu.visibleBlocksLastFrame = static_cast<uint32_t>(schedule.visibleBlocks.size());
+
+	if (!renderer::uploadBlockDebugStates(rendererRef, blockDebugStates)) {
+		gpu.schedulerError = "Failed to upload block debug states";
+	}
+}
+
+void RenderLoop::renderOcclusionDepthData(bool hasUploadedBlockData, const glm::mat4& viewProjection, int viewportY) {
+	if (uiRef.gpuState.enableDepthOcclusion && hasUploadedBlockData) {
+		GPU_PROFILE_SCOPE(uiRef.profiler, "Occlusion Depth Prepass");
+		renderer::drawBlockDepthPrepassInstanced(rendererRef, uiRef.gpuState.resources, viewProjection, 0, /*cullNonVisible=*/true);
+	}
+
+	if (uiRef.gpuState.enableDepthOcclusion) {
+		{
+			CPU_PROFILE_SCOPE(uiRef.profiler, "Depth Async Capture");
+			depth_pyramid::initiateAsyncCapture(depthReadback, uiRef.viewportX, viewportY, uiRef.viewportWidth, uiRef.viewportHeight);
+		}
+		{
+			CPU_PROFILE_SCOPE(uiRef.profiler, "Depth Pyramid Build");
+			const bool built = depth_pyramid::buildPyramidFromPBO(depthReadback, previousDepthPyramid);
+			if (!built && depthReadback.hasValidData) {
+				// Pyramid build failed but readback is active — transient; will resolve next frame.
+			}
+		}
+	} else {
+		previousDepthPyramid.clear();
+		depth_pyramid::shutdownAsyncReadback(depthReadback);
+	}
 }
 
 void RenderLoop::drawFrame() {
@@ -120,10 +248,25 @@ void RenderLoop::drawFrame() {
 				ui::verifyBlockDataOnGPU(uiRef);
 			}
 
+			// Handle brick cache debug requests (Task 3)
+			if (uiRef.gpuState.brickCacheReinitRequested) {
+				uiRef.gpuState.brickCacheReinitRequested = false;
+				ui::reinitBrickCache(uiRef);
+			}
+			if (uiRef.gpuState.brickCacheClearRequested) {
+				uiRef.gpuState.brickCacheClearRequested = false;
+				ui::clearBrickCache(uiRef);
+			}
+			if (uiRef.gpuState.brickCachePrimeRequested) {
+				uiRef.gpuState.brickCachePrimeRequested = false;
+				ui::primeBrickCacheFromLoadedBlocks(uiRef);
+			}
+
 			// Update renderer with grid transform if GPU data was uploaded (Milestone 1.4)
 			if (uiRef.gpuState.rendererNeedsUpdate) {
 				uiRef.gpuState.rendererNeedsUpdate = false;
-				renderer::setGridTransform(rendererRef, uiRef.gpuState.voxelSize, uiRef.gpuState.blockSize);
+				renderer::setGridTransform(rendererRef, uiRef.gpuState.gridTransform, uiRef.gpuState.voxelSize,
+				                           static_cast<uint8_t>(uiRef.gpuState.blockSize));
 			}
 		}
 
@@ -153,6 +296,11 @@ void RenderLoop::drawFrame() {
 		camera::computeViewProjectionMatrix(cameraRef);
 
 		{
+			CPU_PROFILE_SCOPE(uiRef.profiler, "Visibility + Cache Update");
+			updateVisibilityAndCache();
+		}
+
+		{
 			CPU_PROFILE_SCOPE(uiRef.profiler, "Render 3D Scene");
 			// Clear the entire screen
 			glViewport(0, 0, windowWidth, windowHeight);
@@ -177,16 +325,20 @@ void RenderLoop::drawFrame() {
 
 			// Draw block bboxes using GPU instancing if data is uploaded (Milestone 1.4)
 			// This replaces the CPU-generated bbox mesh when GPU data is available
-			if (uiRef.gpuState.blockIndicesUploaded && uiRef.gpuState.resources.hasBlockData()) {
+			const bool hasUploadedBlockData = uiRef.gpuState.blockIndicesUploaded && uiRef.gpuState.resources.hasBlockData();
+			if (hasUploadedBlockData) {
 				// Compute block limit based on UI settings
 				size_t maxBlocks = 0;  // 0 = all blocks
 				if (uiRef.gpuState.useBlockLimit && uiRef.gpuState.maxDisplayBlocks > 0) {
 					maxBlocks = static_cast<size_t>(uiRef.gpuState.maxDisplayBlocks);
 				}
+				rendererRef.useBlockDebugColors = uiRef.gpuState.colorBlocksByVisibility;
 
 				GPU_PROFILE_SCOPE(uiRef.profiler, "Block BBoxes Draw");
 				renderer::drawBlockBBoxesInstanced(rendererRef, uiRef.gpuState.resources, cameraRef.viewProjectionMatrix, maxBlocks);
 			}
+
+			renderOcclusionDepthData(hasUploadedBlockData, cameraRef.viewProjectionMatrix, viewportY);
 
 			// Disable scissor for UI rendering
 			glDisable(GL_SCISSOR_TEST);

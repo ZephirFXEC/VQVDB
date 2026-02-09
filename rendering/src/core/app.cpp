@@ -80,7 +80,7 @@ int App::run() {
 		}
 	});
 
-	inputController->bindCallbacks(window.raw());
+	InputController::bindCallbacks(window.raw());
 
 	glViewport(0, 0, config.width, config.height);
 	glClearColor(0.05f, 0.08f, 0.12f, 1.0f);

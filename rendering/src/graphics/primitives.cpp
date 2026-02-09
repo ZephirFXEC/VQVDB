@@ -53,6 +53,41 @@ MeshData createUnitCubeWireframe() noexcept {
 	return data;
 }
 
+MeshData createUnitCubeSolid() noexcept {
+	MeshData data;
+	data.primitiveType = GL_TRIANGLES;
+
+	const float r = 1.0f, g = 1.0f, b = 1.0f;
+
+	data.vertices = {
+	    {0.0f, 0.0f, 0.0f, r, g, b},  // 0
+	    {1.0f, 0.0f, 0.0f, r, g, b},  // 1
+	    {0.0f, 0.0f, 1.0f, r, g, b},  // 2
+	    {1.0f, 0.0f, 1.0f, r, g, b},  // 3
+	    {0.0f, 1.0f, 0.0f, r, g, b},  // 4
+	    {1.0f, 1.0f, 0.0f, r, g, b},  // 5
+	    {0.0f, 1.0f, 1.0f, r, g, b},  // 6
+	    {1.0f, 1.0f, 1.0f, r, g, b},  // 7
+	};
+
+	data.indices = {
+	    // Bottom (y=0)
+	    0, 2, 1, 1, 2, 3,
+	    // Top (y=1)
+	    4, 5, 6, 5, 7, 6,
+	    // Front (z=0)
+	    0, 1, 4, 1, 5, 4,
+	    // Back (z=1)
+	    2, 6, 3, 3, 6, 7,
+	    // Left (x=0)
+	    0, 4, 2, 2, 4, 6,
+	    // Right (x=1)
+	    1, 3, 5, 3, 7, 5,
+	};
+
+	return data;
+}
+
 MeshData createGrid(int gridSize, float cellSize, float r, float g, float b) noexcept {
 	MeshData data;
 	data.primitiveType = GL_LINES;

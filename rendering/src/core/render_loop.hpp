@@ -1,5 +1,12 @@
 #pragma once
 
+#include <cstdint>
+#include <vector>
+
+#include <glm/glm.hpp>
+
+#include "core/depth_pyramid.hpp"
+
 class Window;
 struct CameraState;
 struct CameraLimits;
@@ -17,6 +24,10 @@ class RenderLoop {
    private:
 	void updateTiming();
 	void updateTitle();
+	void resetVisibilityStats() noexcept;
+	void clearVisibilityDebugState() noexcept;
+	void updateVisibilityAndCache();
+	void renderOcclusionDepthData(bool hasUploadedBlockData, const glm::mat4& viewProjection, int viewportY);
 
 	Window& windowRef;
 	CameraState& cameraRef;
@@ -25,4 +36,8 @@ class RenderLoop {
 	RendererState& rendererRef;
 	Timing& timingRef;
 	UIState& uiRef;
+	std::vector<uint32_t> blockDebugStates;
+	size_t lastDebugStateBlockCount{0};
+	depth_pyramid::DepthPyramid previousDepthPyramid;
+	depth_pyramid::AsyncDepthReadback depthReadback;
 };

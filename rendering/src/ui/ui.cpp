@@ -208,6 +208,135 @@ void sectionHeader(const char* label) {
 	ImGui::TextUnformatted(label);
 }
 
+ImU32 heatColor(float t) {
+	t = std::clamp(t, 0.0f, 1.0f);
+	// Cool -> warm ramp: blue -> cyan -> yellow -> red.
+	const ImVec4 c0{0.10f, 0.18f, 0.35f, 1.0f};
+	const ImVec4 c1{0.15f, 0.55f, 0.75f, 1.0f};
+	const ImVec4 c2{0.92f, 0.78f, 0.25f, 1.0f};
+	const ImVec4 c3{0.88f, 0.25f, 0.20f, 1.0f};
+	ImVec4 c{};
+	if (t < 0.33f) {
+		const float u = t / 0.33f;
+		c = ImLerp(c0, c1, u);
+	} else if (t < 0.66f) {
+		const float u = (t - 0.33f) / 0.33f;
+		c = ImLerp(c1, c2, u);
+	} else {
+		const float u = (t - 0.66f) / 0.34f;
+		c = ImLerp(c2, c3, u);
+	}
+	return ImGui::GetColorU32(c);
+}
+
+void renderBrickCacheHeatmap(UIState& state) {
+	auto& gpu = state.gpuState;
+	if (!gpu.brickCacheInitialized) {
+		ImGui::TextColored(colorWarn(), "Brick cache is not initialized");
+		return;
+	}
+
+	const vqvdb::BrickCacheDebugSnapshot snapshot = vqvdb::buildBrickCacheDebugSnapshot(gpu.brickCache);
+	if (snapshot.capacitySlots == 0 || snapshot.slotGridDims.x <= 0 || snapshot.slotGridDims.y <= 0 || snapshot.slotGridDims.z <= 0) {
+		ImGui::TextColored(colorWarn(), "Brick cache has no slots");
+		return;
+	}
+
+	const vqvdb::BrickCacheStats stats = vqvdb::getCacheStats(gpu.brickCache);
+	ImGui::Text("Resident: %u / %u  (%.1f%%)", stats.residentBricks, stats.capacitySlots,
+	            (stats.capacitySlots > 0) ? (100.0f * static_cast<float>(stats.residentBricks) / static_cast<float>(stats.capacitySlots)) : 0.0f);
+	ImGui::Text("Lookups: %llu  Hits: %llu  Hit rate: %.1f%%  Evictions: %llu", static_cast<unsigned long long>(stats.lookupCount),
+	            static_cast<unsigned long long>(stats.hitCount), 100.0f * stats.hitRate, static_cast<unsigned long long>(stats.evictionCount));
+
+	const char* modes[] = {"Least Used (Age)", "Least Used (Touches)", "LRU Tail Rank"};
+	gpu.brickCacheHeatmapMode = std::clamp(gpu.brickCacheHeatmapMode, 0, 2);
+	ImGui::Combo("Heatmap Mode", &gpu.brickCacheHeatmapMode, modes, IM_ARRAYSIZE(modes));
+
+	gpu.brickCacheHeatmapSlice = std::clamp(gpu.brickCacheHeatmapSlice, 0, snapshot.slotGridDims.z - 1);
+	if (snapshot.slotGridDims.z > 1) {
+		ImGui::SliderInt("Z Slice", &gpu.brickCacheHeatmapSlice, 0, snapshot.slotGridDims.z - 1);
+	}
+
+	const int sx = snapshot.slotGridDims.x;
+	const int sy = snapshot.slotGridDims.y;
+	const int z = gpu.brickCacheHeatmapSlice;
+
+	ImGui::TextColored(colorMuted(), "Slice dimensions: %d x %d (z=%d)", sx, sy, z);
+
+	const ImVec2 avail = ImGui::GetContentRegionAvail();
+	const float cellW = std::max(4.0f, std::min(16.0f, (avail.x - 4.0f) / static_cast<float>(sx)));
+	const float cellH = cellW;
+	const float pad = 1.0f;
+	const ImVec2 start = ImGui::GetCursorScreenPos();
+	const ImVec2 canvasSize(cellW * static_cast<float>(sx), cellH * static_cast<float>(sy));
+	ImGui::InvisibleButton("brickCacheHeatmapCanvas", canvasSize);
+	ImDrawList* draw = ImGui::GetWindowDrawList();
+	draw->AddRectFilled(start, ImVec2(start.x + canvasSize.x, start.y + canvasSize.y), ImGui::GetColorU32(ImVec4(0.07f, 0.07f, 0.09f, 1.0f)));
+	draw->AddRect(start, ImVec2(start.x + canvasSize.x, start.y + canvasSize.y), ImGui::GetColorU32(ImVec4(0.25f, 0.25f, 0.3f, 1.0f)));
+
+	std::optional<uint32_t> hoveredSlot;
+	const ImVec2 mouse = ImGui::GetIO().MousePos;
+
+	const int slotsPerLayer = sx * sy;
+	for (int y = 0; y < sy; ++y) {
+		for (int x = 0; x < sx; ++x) {
+			const uint32_t slot = static_cast<uint32_t>(z * slotsPerLayer + y * sx + x);
+			if (slot >= snapshot.slots.size()) continue;
+			const auto& info = snapshot.slots[slot];
+
+			float norm = 0.0f;
+			if (info.occupied) {
+				switch (gpu.brickCacheHeatmapMode) {
+					case 0: {
+						const uint64_t age = (snapshot.accessCounter >= info.lastAccessCounter) ? (snapshot.accessCounter - info.lastAccessCounter) : 0ull;
+						norm = (snapshot.maxAge > 0) ? static_cast<float>(age) / static_cast<float>(snapshot.maxAge) : 0.0f;
+						break;
+					}
+					case 1: {
+						norm = (snapshot.maxTouchCount > 0)
+						           ? (1.0f - static_cast<float>(info.touchCount) / static_cast<float>(snapshot.maxTouchCount))
+						           : 0.0f;
+						break;
+					}
+					case 2: {
+						norm = (snapshot.residentBricks > 1 && info.lruRank != 0xFFFFFFFFu)
+						           ? static_cast<float>(info.lruRank) / static_cast<float>(snapshot.residentBricks - 1u)
+						           : 0.0f;
+						break;
+					}
+				}
+			}
+
+			const ImU32 color = info.occupied ? heatColor(norm) : ImGui::GetColorU32(ImVec4(0.12f, 0.12f, 0.14f, 1.0f));
+			const ImVec2 p0(start.x + static_cast<float>(x) * cellW + pad, start.y + static_cast<float>(y) * cellH + pad);
+			const ImVec2 p1(start.x + static_cast<float>(x + 1) * cellW - pad, start.y + static_cast<float>(y + 1) * cellH - pad);
+			draw->AddRectFilled(p0, p1, color);
+
+			if (mouse.x >= p0.x && mouse.x <= p1.x && mouse.y >= p0.y && mouse.y <= p1.y) {
+				hoveredSlot = slot;
+			}
+		}
+	}
+
+	if (hoveredSlot.has_value() && hoveredSlot.value() < snapshot.slots.size()) {
+		const uint32_t slot = hoveredSlot.value();
+		const auto& info = snapshot.slots[slot];
+		ImGui::BeginTooltip();
+		ImGui::Text("Slot: %u", slot);
+		ImGui::Text("Occupied: %s", info.occupied ? "yes" : "no");
+		if (info.occupied) {
+			ImGui::Text("Morton: %llu", static_cast<unsigned long long>(info.mortonCode));
+			ImGui::Text("Touches: %u", info.touchCount);
+			const uint64_t age = (snapshot.accessCounter >= info.lastAccessCounter) ? (snapshot.accessCounter - info.lastAccessCounter) : 0ull;
+			ImGui::Text("Age: %llu", static_cast<unsigned long long>(age));
+			if (info.lruRank != 0xFFFFFFFFu) {
+				ImGui::Text("LRU rank: %u (0 = MRU)", info.lruRank);
+			}
+		}
+		ImGui::EndTooltip();
+	}
+}
+
 void renderLeftPanel(UIState& state, CameraState& camera, CameraLimits& limits) {
 	ImGui::SetNextWindowSize(ImVec2(state.leftPanelWidth, 720.0f), ImGuiCond_FirstUseEver);
 	if (ImGui::Begin("Control Panel")) {
@@ -410,6 +539,7 @@ void renderGpuDebugPanel(UIState& state) {
 		// Visualization tuning
 		sectionHeader("Block Visualization");
 		ImGui::Checkbox("Limit displayed blocks", &gpu.useBlockLimit);
+		ImGui::Checkbox("Color by visibility/cache state", &gpu.colorBlocksByVisibility);
 		if (gpu.resources.numBlocks == 0) {
 			ImGui::TextColored(colorMuted(), "No blocks uploaded yet");
 		} else if (gpu.useBlockLimit) {
@@ -420,6 +550,57 @@ void renderGpuDebugPanel(UIState& state) {
 		} else {
 			ImGui::Text("Showing all %zu blocks", gpu.resources.numBlocks);
 		}
+
+		sectionHeader("Visibility Scheduler");
+		ImGui::Checkbox("Enable frustum culling", &gpu.enableFrustumCulling);
+		ImGui::Checkbox("Enable depth occlusion (Hi-Z)", &gpu.enableDepthOcclusion);
+		ImGui::Checkbox("Auto update cache from visible set", &gpu.autoUpdateVisibleCache);
+		ImGui::InputInt("Decode budget / frame", &gpu.decodeBudgetPerFrame);
+		gpu.decodeBudgetPerFrame = std::max(0, gpu.decodeBudgetPerFrame);
+		ImGui::InputFloat("Max decode distance", &gpu.maxDecodeDistance, 10.0f, 100.0f, "%.1f");
+		gpu.maxDecodeDistance = std::max(0.0f, gpu.maxDecodeDistance);
+		ImGui::InputFloat("Occlusion depth bias", &gpu.occlusionDepthBias, 0.0001f, 0.001f, "%.5f");
+		gpu.occlusionDepthBias = std::max(0.0f, gpu.occlusionDepthBias);
+		if (gpu.maxDecodeDistance <= 0.0f) {
+			ImGui::TextColored(colorMuted(), "Distance limit: disabled");
+		}
+		ImGui::Text("Visible: %u (cached=%u, missing=%u)", gpu.visibleBlocksLastFrame, gpu.visibleCachedLastFrame, gpu.visibleMissingLastFrame);
+		ImGui::Text("Scheduled decodes: %u (occluded filtered=%u)", gpu.scheduledDecodesLastFrame, gpu.occludedRequestsLastFrame);
+		ImGui::Text("Cache update: touched=%u, inserted=%u, evicted=%u", gpu.cacheTouchedLastFrame, gpu.cacheInsertedLastFrame,
+		            gpu.cacheEvictedLastFrame);
+		if (!gpu.schedulerError.empty()) {
+			ImGui::TextColored(colorError(), "%s", gpu.schedulerError.c_str());
+		}
+
+		sectionHeader("Brick Cache");
+		ImGui::InputInt("Cache capacity (slots)", &gpu.brickCacheCapacity);
+		gpu.brickCacheCapacity = std::max(1, gpu.brickCacheCapacity);
+		ImGui::Checkbox("Allocate atlas texture", &gpu.brickCacheAllocateTexture);
+		if (ImGui::Button("Recreate Cache", ImVec2(-1, 0))) {
+			gpu.brickCacheReinitRequested = true;
+		}
+		if (ImGui::Button("Clear Cache", ImVec2(-1, 0))) {
+			gpu.brickCacheClearRequested = true;
+		}
+
+		const bool canPrime = state.volumeState.isLoaded && state.volumeState.file.has_value() && !state.volumeState.file->grids.empty();
+		ImGui::InputInt("Prime count", &gpu.brickCachePrimeCount);
+		gpu.brickCachePrimeCount = std::max(1, gpu.brickCachePrimeCount);
+		if (!canPrime) {
+			ImGui::BeginDisabled();
+		}
+		if (ImGui::Button("Prime Cache From Loaded Blocks", ImVec2(-1, 0))) {
+			gpu.brickCachePrimeRequested = true;
+		}
+		if (!canPrime) {
+			ImGui::EndDisabled();
+			ImGui::TextColored(colorMuted(), "Load a VQVDB file first to prime cache.");
+		}
+
+		if (!gpu.brickCacheError.empty()) {
+			ImGui::TextColored(colorError(), "%s", gpu.brickCacheError.c_str());
+		}
+		renderBrickCacheHeatmap(state);
 
 		sectionHeader("Troubleshooting");
 		if (!state.volumeState.loadError.empty()) {
@@ -679,6 +860,11 @@ bool loadVQVDBFile(UIState& state, const std::string& filePath) noexcept {
 	ss << "Loaded successfully: " << state.volumeState.stats.totalGrids << " grid(s), " << state.volumeState.stats.totalBlocks << " blocks";
 	logMessage(state, ss.str());
 
+	// New dataset invalidates previous cache contents.
+	if (state.gpuState.brickCacheInitialized) {
+		clearBrickCache(state);
+	}
+
 	return true;
 }
 
@@ -811,6 +997,7 @@ bool uploadBlockDataToGPU(UIState& state) noexcept {
 	// Store grid transform info for GPU instanced rendering
 	gpu.voxelSize = grid.metadata.transform.voxelSize();
 	gpu.blockSize = static_cast<float>(vqvdb::kBlockSize);
+	gpu.gridTransform = grid.metadata.transform.toMat4();
 	gpu.rendererNeedsUpdate = true;
 
 	// Initialize block display limit to total blocks
@@ -877,13 +1064,104 @@ void verifyBlockDataOnGPU(UIState& state) noexcept {
 	}
 }
 
+bool reinitBrickCache(UIState& state) noexcept {
+	auto& gpu = state.gpuState;
+
+	vqvdb::BrickCacheConfig config{};
+	config.capacitySlots = static_cast<uint32_t>(std::max(1, gpu.brickCacheCapacity));
+	config.brickSizeVoxels = static_cast<uint32_t>(vqvdb::kBlockSize);
+	config.allocateAtlasTexture = gpu.brickCacheAllocateTexture;
+
+	logMessage(state, std::format("Initializing brick cache: {} slots, atlasTexture={}", config.capacitySlots,
+	                              config.allocateAtlasTexture ? "on" : "off"));
+
+	const auto result = vqvdb::initBrickCache(gpu.brickCache, config);
+	if (!result.has_value()) {
+		gpu.brickCacheInitialized = false;
+		gpu.brickCacheError = std::format("Brick cache init failed: {}", vqvdb::errorToString(result.error()));
+		logMessage(state, "ERROR: " + gpu.brickCacheError);
+		return false;
+	}
+
+	gpu.brickCacheInitialized = true;
+	gpu.brickCacheError.clear();
+	gpu.brickCacheHeatmapSlice = 0;
+
+	logMessage(state, std::format("Brick cache ready: slotGrid={}x{}x{}, atlas={}x{}x{}", gpu.brickCache.slotGridDims.x,
+	                              gpu.brickCache.slotGridDims.y, gpu.brickCache.slotGridDims.z, gpu.brickCache.atlasDimsVoxels.x,
+	                              gpu.brickCache.atlasDimsVoxels.y, gpu.brickCache.atlasDimsVoxels.z));
+	return true;
+}
+
+void clearBrickCache(UIState& state) noexcept {
+	auto& gpu = state.gpuState;
+	if (!gpu.brickCacheInitialized) {
+		gpu.brickCacheError = "Brick cache is not initialized";
+		return;
+	}
+
+	logMessage(state, "Clearing brick cache...");
+	if (!reinitBrickCache(state)) {
+		return;
+	}
+	logMessage(state, "Brick cache cleared");
+}
+
+void primeBrickCacheFromLoadedBlocks(UIState& state) noexcept {
+	auto& gpu = state.gpuState;
+	const auto& vol = state.volumeState;
+
+	if (!gpu.brickCacheInitialized && !reinitBrickCache(state)) {
+		return;
+	}
+	if (!vol.isLoaded || !vol.file.has_value() || vol.file->grids.empty()) {
+		gpu.brickCacheError = "Cannot prime cache: no VQVDB file loaded";
+		return;
+	}
+
+	const auto& origins = vol.file->grids[0].blocks.origins;
+	if (origins.empty()) {
+		gpu.brickCacheError = "Cannot prime cache: loaded grid has no blocks";
+		return;
+	}
+
+	const size_t count = std::min<size_t>(static_cast<size_t>(std::max(1, gpu.brickCachePrimeCount)), origins.size());
+	size_t inserted = 0;
+	for (size_t i = 0; i < count; ++i) {
+		const auto alloc = vqvdb::allocateSlot(gpu.brickCache, origins[i]);
+		if (!alloc.has_value()) {
+			gpu.brickCacheError = std::format("Cache prime failed at block {}: {}", i, vqvdb::errorToString(alloc.error()));
+			logMessage(state, "ERROR: " + gpu.brickCacheError);
+			return;
+		}
+		++inserted;
+	}
+
+	const auto hashUpload = vqvdb::uploadCacheHashTable(gpu.brickCache);
+	if (!hashUpload.has_value()) {
+		gpu.brickCacheError = std::format("Cache hash table upload failed: {}", vqvdb::errorToString(hashUpload.error()));
+		logMessage(state, "ERROR: " + gpu.brickCacheError);
+		return;
+	}
+
+	gpu.brickCacheError.clear();
+	const auto stats = vqvdb::getCacheStats(gpu.brickCache);
+	logMessage(state, std::format("Primed brick cache with {} blocks (resident={}/{}, evictions={})", inserted, stats.residentBricks,
+	                              stats.capacitySlots, static_cast<unsigned long long>(stats.evictionCount)));
+}
+
 void initGPUResources(UIState& state) noexcept {
 	logMessage(state, "Initializing GPU resources...");
 	vqvdb::initGPUResources(state.gpuState.resources);
+	(void)reinitBrickCache(state);
 	logMessage(state, "GPU resources initialized");
 }
 
-void shutdownGPUResources(UIState& state) noexcept { vqvdb::shutdownGPUResources(state.gpuState.resources); }
+void shutdownGPUResources(UIState& state) noexcept {
+	vqvdb::shutdownBrickCache(state.gpuState.brickCache);
+	state.gpuState.brickCacheInitialized = false;
+	vqvdb::shutdownGPUResources(state.gpuState.resources);
+}
 
 bool wantCaptureMouse() noexcept {
 	// When the mouse is over the Viewport docked window, let the 3D camera

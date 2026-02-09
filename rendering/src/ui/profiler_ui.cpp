@@ -9,6 +9,8 @@
 #include <format>
 #include <functional>
 #include <string>
+#include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include "ui/ui.hpp"
@@ -18,6 +20,57 @@ namespace profiler_ui {
 namespace {
 
 constexpr float kFlameRowHeight = 18.0f;
+constexpr size_t kFlameAverageWindowFrames = 240;
+
+template <typename T>
+void hashCombine(size_t& seed, const T& value) noexcept {
+	seed ^= std::hash<T>{}(value) + 0x9e3779b9u + (seed << 6u) + (seed >> 2u);
+}
+
+struct ScopeEventBaseKey {
+	std::string_view name{};
+	profiler::ScopeType type{profiler::ScopeType::CPU};
+	int depth{0};
+	profiler::TransferDirection transferDirection{profiler::TransferDirection::CPUToCPU};
+	std::string_view sourceFile{};
+	int sourceLine{0};
+
+	[[nodiscard]] bool operator==(const ScopeEventBaseKey& other) const noexcept = default;
+};
+
+struct ScopeEventBaseKeyHash {
+	[[nodiscard]] size_t operator()(const ScopeEventBaseKey& key) const noexcept {
+		size_t seed = 0;
+		hashCombine(seed, key.name);
+		hashCombine(seed, static_cast<int>(key.type));
+		hashCombine(seed, key.depth);
+		hashCombine(seed, static_cast<int>(key.transferDirection));
+		hashCombine(seed, key.sourceFile);
+		hashCombine(seed, key.sourceLine);
+		return seed;
+	}
+};
+
+struct ScopeEventKey {
+	ScopeEventBaseKey base{};
+	size_t occurrence{0};
+
+	[[nodiscard]] bool operator==(const ScopeEventKey& other) const noexcept = default;
+};
+
+struct ScopeEventKeyHash {
+	[[nodiscard]] size_t operator()(const ScopeEventKey& key) const noexcept {
+		size_t seed = ScopeEventBaseKeyHash{}(key.base);
+		hashCombine(seed, key.occurrence);
+		return seed;
+	}
+};
+
+struct FlameGraphAggregate {
+	std::vector<profiler::ScopeEvent> events;
+	double totalTimeMs{0.0};
+	size_t frameCount{0};
+};
 
 [[nodiscard]] const char* directionLabel(profiler::TransferDirection direction) noexcept {
 	switch (direction) {
@@ -61,9 +114,109 @@ constexpr float kFlameRowHeight = 18.0f;
 	return depth;
 }
 
+template <typename Predicate>
+[[nodiscard]] std::vector<const profiler::FrameProfile*> collectRecentFrames(const std::vector<const profiler::FrameProfile*>& frames,
+                                                                              size_t maxCount, Predicate&& predicate) {
+	std::vector<const profiler::FrameProfile*> selected;
+	selected.reserve(std::min(maxCount, frames.size()));
+	for (auto it = frames.rbegin(); it != frames.rend() && selected.size() < maxCount; ++it) {
+		const profiler::FrameProfile* frame = *it;
+		if (frame != nullptr && predicate(*frame)) {
+			selected.push_back(frame);
+		}
+	}
+	std::reverse(selected.begin(), selected.end());
+	return selected;
+}
+
+template <typename EventGetter, typename TotalGetter>
+[[nodiscard]] FlameGraphAggregate averageFlameGraph(const std::vector<const profiler::FrameProfile*>& frames, EventGetter&& eventGetter,
+                                                    TotalGetter&& totalGetter) {
+	FlameGraphAggregate aggregate;
+	if (frames.empty()) {
+		return aggregate;
+	}
+
+	struct EventAccum {
+		profiler::ScopeEvent sample;
+		double startMsSum{0.0};
+		double endMsSum{0.0};
+		double bytesSum{0.0};
+		size_t samples{0};
+	};
+
+	std::unordered_map<ScopeEventKey, EventAccum, ScopeEventKeyHash> accumByKey;
+	double totalTimeMsSum = 0.0;
+
+	for (const profiler::FrameProfile* frame : frames) {
+		if (frame == nullptr) continue;
+
+		totalTimeMsSum += std::max(0.0, totalGetter(*frame));
+		++aggregate.frameCount;
+
+		std::unordered_map<ScopeEventBaseKey, size_t, ScopeEventBaseKeyHash> occurrenceByBase;
+		const auto& events = eventGetter(*frame);
+		for (const profiler::ScopeEvent& event : events) {
+			if (event.durationMs() <= 0.0) continue;
+
+			ScopeEventBaseKey baseKey;
+			baseKey.name = event.name;
+			baseKey.type = event.type;
+			baseKey.depth = event.depth;
+			baseKey.transferDirection = event.transferDirection;
+			baseKey.sourceFile = (event.source.file != nullptr) ? std::string_view(event.source.file) : std::string_view{};
+			baseKey.sourceLine = event.source.line;
+
+			const size_t occurrence = occurrenceByBase[baseKey]++;
+			ScopeEventKey eventKey;
+			eventKey.base = baseKey;
+			eventKey.occurrence = occurrence;
+
+			auto [accumIt, inserted] = accumByKey.try_emplace(eventKey);
+			EventAccum& accum = accumIt->second;
+			if (inserted) {
+				accum.sample = event;
+			}
+
+			accum.startMsSum += event.startMs;
+			accum.endMsSum += event.endMs;
+			accum.bytesSum += static_cast<double>(event.bytes);
+			++accum.samples;
+		}
+	}
+
+	if (aggregate.frameCount == 0) {
+		return aggregate;
+	}
+
+	aggregate.totalTimeMs = totalTimeMsSum / static_cast<double>(aggregate.frameCount);
+	aggregate.events.reserve(accumByKey.size());
+	for (auto& [_, accum] : accumByKey) {
+		if (accum.samples == 0) continue;
+
+		profiler::ScopeEvent event = accum.sample;
+		const double invSampleCount = 1.0 / static_cast<double>(accum.samples);
+		event.startMs = accum.startMsSum * invSampleCount;
+		event.endMs = accum.endMsSum * invSampleCount;
+		if (event.endMs < event.startMs) {
+			std::swap(event.startMs, event.endMs);
+		}
+		event.bytes = static_cast<size_t>(std::llround(accum.bytesSum * invSampleCount));
+		aggregate.events.push_back(std::move(event));
+	}
+
+	std::sort(aggregate.events.begin(), aggregate.events.end(), [](const profiler::ScopeEvent& a, const profiler::ScopeEvent& b) {
+		if (a.startMs != b.startMs) return a.startMs < b.startMs;
+		if (a.depth != b.depth) return a.depth < b.depth;
+		return a.name < b.name;
+	});
+
+	return aggregate;
+}
+
 void drawFlameGraph(const char* childId, const std::vector<profiler::ScopeEvent>& events, double totalTimeMs) {
 	if (events.empty()) {
-		ImGui::TextDisabled("No scope events in this frame.");
+		ImGui::TextDisabled("No scope events to display.");
 		return;
 	}
 
@@ -250,15 +403,6 @@ void renderProfilerTab(UIState& state) noexcept {
 
 	const profiler::FrameProfile* selectedFrame = closedFrames[state.profilerSelectedClosedFrame];
 	const profiler::FrameProfile* selectedGpuFrame = selectedFrame->gpuResolved ? selectedFrame : nullptr;
-	const profiler::FrameProfile* fallbackGpuFrame = nullptr;
-	if (selectedGpuFrame == nullptr) {
-		for (int idx = state.profilerSelectedClosedFrame; idx >= 0; --idx) {
-			if (closedFrames[static_cast<size_t>(idx)]->gpuResolved) {
-				fallbackGpuFrame = closedFrames[static_cast<size_t>(idx)];
-				break;
-			}
-		}
-	}
 
 	ImGui::SeparatorText("Frame Summary");
 	ImGui::Text("Frame #%llu", static_cast<unsigned long long>(selectedFrame->frameId));
@@ -278,18 +422,30 @@ void renderProfilerTab(UIState& state) noexcept {
 	ImGui::SeparatorText("Transfer Events");
 	renderTransferTable(*selectedFrame);
 
+	const std::vector<const profiler::FrameProfile*> cpuAverageFrames =
+	    collectRecentFrames(closedFrames, kFlameAverageWindowFrames, [](const profiler::FrameProfile&) { return true; });
+	const FlameGraphAggregate averagedCpuFlame =
+	    averageFlameGraph(cpuAverageFrames, [](const profiler::FrameProfile& frame) -> const std::vector<profiler::ScopeEvent>& {
+		    return frame.cpuEvents;
+	    }, [](const profiler::FrameProfile& frame) { return frame.cpuFrameMs; });
+
 	ImGui::SeparatorText("CPU Flame Graph");
-	drawFlameGraph("CPUFlameGraph", selectedFrame->cpuEvents, selectedFrame->cpuFrameMs);
+	ImGui::TextDisabled("Averaged over last %zu frame(s)", averagedCpuFlame.frameCount);
+	drawFlameGraph("CPUFlameGraphAverage", averagedCpuFlame.events, averagedCpuFlame.totalTimeMs);
+
+	const std::vector<const profiler::FrameProfile*> gpuAverageFrames = collectRecentFrames(
+	    closedFrames, kFlameAverageWindowFrames, [](const profiler::FrameProfile& frame) { return frame.gpuResolved; });
+	const FlameGraphAggregate averagedGpuFlame =
+	    averageFlameGraph(gpuAverageFrames, [](const profiler::FrameProfile& frame) -> const std::vector<profiler::ScopeEvent>& {
+		    return frame.gpuEvents;
+	    }, [](const profiler::FrameProfile& frame) { return frame.gpuFrameMs; });
 
 	ImGui::SeparatorText("GPU Flame Graph");
 	if (!profiler.gpuTimingSupported()) {
 		ImGui::TextDisabled("GPU timestamp queries are not supported on this OpenGL context.");
-	} else if (selectedGpuFrame != nullptr && selectedGpuFrame->gpuResolved) {
-		drawFlameGraph("GPUFlameGraph", selectedGpuFrame->gpuEvents, selectedGpuFrame->gpuFrameMs);
-	} else if (fallbackGpuFrame != nullptr) {
-		ImGui::TextDisabled("Selected frame GPU query is unresolved; showing frame #%llu.",
-		                    static_cast<unsigned long long>(fallbackGpuFrame->frameId));
-		drawFlameGraph("GPUFlameGraphFallback", fallbackGpuFrame->gpuEvents, fallbackGpuFrame->gpuFrameMs);
+	} else if (averagedGpuFlame.frameCount > 0) {
+		ImGui::TextDisabled("Averaged over last %zu resolved frame(s)", averagedGpuFlame.frameCount);
+		drawFlameGraph("GPUFlameGraphAverage", averagedGpuFlame.events, averagedGpuFlame.totalTimeMs);
 	} else {
 		ImGui::TextDisabled("Waiting for GPU query results...");
 	}

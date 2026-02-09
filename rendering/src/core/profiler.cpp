@@ -120,6 +120,9 @@ void Profiler::collectFinishedGpuQueries() noexcept {
 					existingEvent.startMs += deltaMs;
 					existingEvent.endMs += deltaMs;
 				}
+				// Keep the frame span aligned with the shifted event timeline when a
+				// newly-resolved query establishes an earlier base timestamp.
+				frame->gpuFrameMs += deltaMs;
 				frame->gpuTimestampBaseNs = startTimestampNs;
 			}
 

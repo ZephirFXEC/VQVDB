@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "core/profiler.hpp"
+#include "vqvdb/brick_cache.hpp"
 #include "vqvdb/codebook_loader.hpp"
 #include "vqvdb/gpu_resources.hpp"
 #include "vqvdb/vqvdb_types.hpp"
@@ -61,7 +62,33 @@ struct GPUResourcesState {
 	// Grid transform info for GPU instanced rendering
 	float voxelSize{1.0f};
 	float blockSize{8.0f};
+	glm::mat4 gridTransform{1.0f};
 	bool rendererNeedsUpdate{false};  // Signal render loop to update renderer state
+
+	// Brick cache state (Task 3 debug visualization)
+	vqvdb::BrickCache brickCache;
+	bool brickCacheInitialized{false};
+	int brickCacheCapacity{2048};
+	bool brickCacheAllocateTexture{true};
+	int brickCachePrimeCount{256};
+	int brickCacheHeatmapSlice{0};
+	int brickCacheHeatmapMode{0};  // 0 age, 1 touches, 2 LRU
+	bool autoUpdateVisibleCache{true};
+	bool enableFrustumCulling{true};
+	bool enableDepthOcclusion{true};
+	bool colorBlocksByVisibility{true};
+	int decodeBudgetPerFrame{64};
+	float maxDecodeDistance{0.0f}; // 0 = no distance limit
+	float occlusionDepthBias{0.001f};
+	uint32_t visibleBlocksLastFrame{0};
+	uint32_t visibleCachedLastFrame{0};
+	uint32_t visibleMissingLastFrame{0};
+	uint32_t scheduledDecodesLastFrame{0};
+	uint32_t occludedRequestsLastFrame{0};
+	uint32_t cacheTouchedLastFrame{0};
+	uint32_t cacheInsertedLastFrame{0};
+	uint32_t cacheEvictedLastFrame{0};
+	std::string schedulerError;
 
 	// Block display limit
 	int maxDisplayBlocks{0};    // 0 = show all blocks
@@ -79,12 +106,16 @@ struct GPUResourcesState {
 	// Error messages
 	std::string codebookError;
 	std::string blockDataError;
+	std::string brickCacheError;
 
 	// Request flags (set by UI, processed by render loop)
 	bool codebookLoadRequested{false};
 	bool codebookVerifyRequested{false};
 	bool blockDataUploadRequested{false};
 	bool blockDataVerifyRequested{false};
+	bool brickCacheReinitRequested{false};
+	bool brickCachePrimeRequested{false};
+	bool brickCacheClearRequested{false};
 
 	void clear() noexcept {
 		codebook.reset();
@@ -94,7 +125,28 @@ struct GPUResourcesState {
 		blockMetadataVerification = {};
 		voxelSize = 1.0f;
 		blockSize = 8.0f;
+		gridTransform = glm::mat4(1.0f);
 		rendererNeedsUpdate = false;
+		brickCacheCapacity = 2048;
+		brickCachePrimeCount = 256;
+		brickCacheHeatmapSlice = 0;
+		brickCacheHeatmapMode = 0;
+		autoUpdateVisibleCache = true;
+		enableFrustumCulling = true;
+		enableDepthOcclusion = true;
+		colorBlocksByVisibility = true;
+		decodeBudgetPerFrame = 64;
+		maxDecodeDistance = 0.0f;
+		occlusionDepthBias = 0.001f;
+		visibleBlocksLastFrame = 0;
+		visibleCachedLastFrame = 0;
+		visibleMissingLastFrame = 0;
+		scheduledDecodesLastFrame = 0;
+		occludedRequestsLastFrame = 0;
+		cacheTouchedLastFrame = 0;
+		cacheInsertedLastFrame = 0;
+		cacheEvictedLastFrame = 0;
+		schedulerError.clear();
 		maxDisplayBlocks = 0;
 		useBlockLimit = false;
 		codebookLoaded = false;
@@ -106,6 +158,7 @@ struct GPUResourcesState {
 		blockMetadataVerified = false;
 		codebookError.clear();
 		blockDataError.clear();
+		brickCacheError.clear();
 	}
 };
 
@@ -201,6 +254,11 @@ bool uploadBlockDataToGPU(UIState& state) noexcept;
 
 // Verify block data on GPU (Milestone 1.3)
 void verifyBlockDataOnGPU(UIState& state) noexcept;
+
+// Brick cache control helpers (Task 3 debug)
+bool reinitBrickCache(UIState& state) noexcept;
+void primeBrickCacheFromLoadedBlocks(UIState& state) noexcept;
+void clearBrickCache(UIState& state) noexcept;
 
 // Initialize GPU resources (call after GL context is ready)
 void initGPUResources(UIState& state) noexcept;
