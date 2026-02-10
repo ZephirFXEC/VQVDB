@@ -1,13 +1,14 @@
 #pragma once
 
 #include <deque>
+#include <future>
 #include <optional>
 #include <string>
 #include <vector>
 
 #include "core/profiler.hpp"
 #include "vqvdb/brick_cache.hpp"
-#include "vqvdb/codebook_loader.hpp"
+#include "vqvdb/decoder_backend.hpp"
 #include "vqvdb/gpu_resources.hpp"
 #include "vqvdb/vqvdb_types.hpp"
 
@@ -46,16 +47,18 @@ struct VQVDBVolumeState {
 };
 
 // GPU Resources State - Milestone 1.2/1.3
+struct DecoderInitTaskResult {
+	std::unique_ptr<vqvdb::DecoderBackend> backend;
+	std::string readyModelPath;
+	std::string errorMessage;
+	bool success{false};
+};
+
 struct GPUResourcesState {
 	// GPU resources handle
 	vqvdb::GPUResources resources;
 
-	// Loaded codebook (CPU side, for verification)
-	std::optional<vqvdb::Codebook> codebook;
-	std::string codebookPath;
-
 	// Verification results
-	vqvdb::VerificationResult codebookVerification;
 	vqvdb::VerificationResult blockIndicesVerification;
 	vqvdb::VerificationResult blockMetadataVerification;
 
@@ -78,7 +81,7 @@ struct GPUResourcesState {
 	bool enableDepthOcclusion{true};
 	bool colorBlocksByVisibility{true};
 	int decodeBudgetPerFrame{64};
-	float maxDecodeDistance{0.0f}; // 0 = no distance limit
+	float maxDecodeDistance{0.0f};  // 0 = no distance limit
 	float occlusionDepthBias{0.001f};
 	uint32_t visibleBlocksLastFrame{0};
 	uint32_t visibleCachedLastFrame{0};
@@ -88,29 +91,32 @@ struct GPUResourcesState {
 	uint32_t cacheTouchedLastFrame{0};
 	uint32_t cacheInsertedLastFrame{0};
 	uint32_t cacheEvictedLastFrame{0};
+	uint32_t decodedBlocksLastFrame{0};
 	std::string schedulerError;
+	std::unique_ptr<vqvdb::DecoderBackend> decoderBackend;
+	std::string decoderModelPath{};
+	bool decoderInitRequested{false};
+	bool decoderInitInProgress{false};
+	std::future<DecoderInitTaskResult> decoderInitTask;
+	bool decoderReady{false};
+	std::string decoderStatus{"Not initialized"};
+	std::string decoderError;
 
 	// Block display limit
 	int maxDisplayBlocks{0};    // 0 = show all blocks
 	bool useBlockLimit{false};  // Toggle for block limit
 
 	// State flags
-	bool codebookLoaded{false};
-	bool codebookUploaded{false};
-	bool codebookVerified{false};
 	bool blockIndicesUploaded{false};
 	bool blockIndicesVerified{false};
 	bool blockMetadataUploaded{false};
 	bool blockMetadataVerified{false};
 
 	// Error messages
-	std::string codebookError;
 	std::string blockDataError;
 	std::string brickCacheError;
 
 	// Request flags (set by UI, processed by render loop)
-	bool codebookLoadRequested{false};
-	bool codebookVerifyRequested{false};
 	bool blockDataUploadRequested{false};
 	bool blockDataVerifyRequested{false};
 	bool brickCacheReinitRequested{false};
@@ -118,9 +124,6 @@ struct GPUResourcesState {
 	bool brickCacheClearRequested{false};
 
 	void clear() noexcept {
-		codebook.reset();
-		codebookPath.clear();
-		codebookVerification = {};
 		blockIndicesVerification = {};
 		blockMetadataVerification = {};
 		voxelSize = 1.0f;
@@ -146,17 +149,24 @@ struct GPUResourcesState {
 		cacheTouchedLastFrame = 0;
 		cacheInsertedLastFrame = 0;
 		cacheEvictedLastFrame = 0;
+		decodedBlocksLastFrame = 0;
 		schedulerError.clear();
+		if (decoderInitTask.valid()) {
+			decoderInitTask.wait();
+		}
+		decoderBackend.reset();
+		decoderModelPath = "models/onnx_models/decoder.onnx";
+		decoderInitRequested = false;
+		decoderInitInProgress = false;
+		decoderReady = false;
+		decoderStatus = "Not initialized";
+		decoderError.clear();
 		maxDisplayBlocks = 0;
 		useBlockLimit = false;
-		codebookLoaded = false;
-		codebookUploaded = false;
-		codebookVerified = false;
 		blockIndicesUploaded = false;
 		blockIndicesVerified = false;
 		blockMetadataUploaded = false;
 		blockMetadataVerified = false;
-		codebookError.clear();
 		blockDataError.clear();
 		brickCacheError.clear();
 	}
@@ -242,13 +252,6 @@ void logMessage(UIState& state, const std::string& message) noexcept;
 // Returns true on success, false on failure (error stored in volumeState.loadError)
 bool loadVQVDBFile(UIState& state, const std::string& filePath) noexcept;
 
-// Load a codebook file and upload to GPU (Milestone 1.2)
-// Returns true on success
-bool loadAndUploadCodebook(UIState& state, const std::string& filePath) noexcept;
-
-// Verify codebook data on GPU (Milestone 1.2)
-void verifyCodebookOnGPU(UIState& state) noexcept;
-
 // Upload block data to GPU (Milestone 1.3)
 bool uploadBlockDataToGPU(UIState& state) noexcept;
 
@@ -262,6 +265,15 @@ void clearBrickCache(UIState& state) noexcept;
 
 // Initialize GPU resources (call after GL context is ready)
 void initGPUResources(UIState& state) noexcept;
+
+// Initialize decoder backend with configured model path.
+[[nodiscard]] bool initDecoderBackend(UIState& state) noexcept;
+
+// Poll decoder async initialization; finalizes ready/error state when complete.
+void pollDecoderBackendInit(UIState& state) noexcept;
+
+// Shutdown decoder backend and release decoder resources.
+void shutdownDecoderBackend(UIState& state) noexcept;
 
 // Shutdown GPU resources
 void shutdownGPUResources(UIState& state) noexcept;

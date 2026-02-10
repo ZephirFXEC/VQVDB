@@ -74,7 +74,6 @@ struct BrickCache {
 	glm::ivec3 slotGridDims{0, 0, 0};
 	uint32_t brickSizeVoxels{kBlockSize};
 	uint32_t capacitySlots{0};
-	uint32_t residentCount{0};
 
 	// CPU side mapping and LRU state
 	std::unordered_map<uint64_t, uint32_t> mortonToSlot;
@@ -99,6 +98,7 @@ struct BrickCache {
 	std::vector<uint64_t> slotLastAccess;
 
 	[[nodiscard]] bool isInitialized() const noexcept { return capacitySlots > 0; }
+	[[nodiscard]] uint32_t residentCount() const noexcept { return static_cast<uint32_t>(mortonToSlot.size()); }
 };
 
 /// Initialize cache state and optionally allocate the atlas texture.
@@ -110,14 +110,8 @@ void shutdownBrickCache(BrickCache& cache) noexcept;
 /// Lookup a brick by morton code. On hit, updates LRU recency.
 [[nodiscard]] GPUResult<std::optional<uint32_t>> lookupBrick(BrickCache& cache, uint64_t mortonCode) noexcept;
 
-/// Lookup a brick by block origin. On hit, updates LRU recency.
-[[nodiscard]] GPUResult<std::optional<uint32_t>> lookupBrick(BrickCache& cache, const BlockOrigin& origin) noexcept;
-
 /// Allocate a cache slot for morton code, evicting LRU entry when full.
 [[nodiscard]] GPUResult<BrickAllocation> allocateSlot(BrickCache& cache, uint64_t mortonCode) noexcept;
-
-/// Allocate a cache slot for block origin, evicting LRU entry when full.
-[[nodiscard]] GPUResult<BrickAllocation> allocateSlot(BrickCache& cache, const BlockOrigin& origin) noexcept;
 
 /// Convert slot index to 3D atlas voxel offset.
 [[nodiscard]] GPUResult<glm::ivec3> slotToAtlasOffset(const BrickCache& cache, uint32_t slotIndex) noexcept;

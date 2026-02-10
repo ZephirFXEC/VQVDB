@@ -9,16 +9,30 @@
 #include <GLFW/glfw3.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
+#include <exception>
+#include <filesystem>
 #include <format>
 #include <numeric>
 #include <sstream>
+
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#elif defined(__linux__)
+#include <unistd.h>
+#endif
 
 #include "core/camera.hpp"
 #include "core/profiler.hpp"
 #include "core/types.hpp"
 #include "ui/profiler_ui.hpp"
-#include "vqvdb/codebook_loader.hpp"
 #include "vqvdb/gpu_resources.hpp"
 #include "vqvdb/vqvdb_loader.hpp"
 
@@ -182,6 +196,75 @@ ImVec4 colorWarn() { return {0.85f, 0.65f, 0.25f, 1.0f}; }
 ImVec4 colorError() { return {0.90f, 0.30f, 0.30f, 1.0f}; }
 ImVec4 colorMuted() { return {0.65f, 0.65f, 0.70f, 1.0f}; }
 
+constexpr const char* kDefaultDecoderModelPath = "C:/Users/zphrfx/Desktop/hdk/VQVDB/models/onnx_models/decoder_opt.onnx";
+constexpr uint32_t kDefaultDecoderMaxBatchSize = 4096;
+
+std::filesystem::path executableDirectory() {
+#if defined(_WIN32)
+	char modulePath[MAX_PATH] = {};
+	const DWORD length = GetModuleFileNameA(nullptr, modulePath, MAX_PATH);
+	if (length > 0 && length < MAX_PATH) {
+		return std::filesystem::path(modulePath).parent_path();
+	}
+#elif defined(__linux__)
+	std::array<char, 4096> modulePath{};
+	const ssize_t length = readlink("/proc/self/exe", modulePath.data(), modulePath.size() - 1);
+	if (length > 0) {
+		modulePath[static_cast<size_t>(length)] = '\0';
+		return std::filesystem::path(modulePath.data()).parent_path();
+	}
+#endif
+	return std::filesystem::current_path();
+}
+
+std::filesystem::path resolveDecoderModelPath(const std::string& configuredPath) {
+	const std::filesystem::path rawPath =
+	    configuredPath.empty() ? std::filesystem::path(kDefaultDecoderModelPath) : std::filesystem::path(configuredPath);
+	return rawPath.is_relative() ? (executableDirectory() / rawPath) : rawPath;
+}
+
+DecoderInitTaskResult runDecoderInitTask(const std::filesystem::path& resolvedPath) {
+	DecoderInitTaskResult result{};
+	std::filesystem::path readyPath = resolvedPath;
+
+	auto backend = std::make_unique<vqvdb::DecoderBackend>();
+	auto initResult = backend->init(resolvedPath, kDefaultDecoderMaxBatchSize);
+	std::string primaryFailureDetails;
+	if (!initResult.has_value()) {
+		primaryFailureDetails = backend->lastErrorMessage();
+	}
+
+	// Fallback: if the default decoder fails to build, try decoder_opt.onnx in the same folder.
+	if (!initResult.has_value() && resolvedPath.filename() == "decoder.onnx") {
+		const std::filesystem::path fallbackPath = resolvedPath.parent_path() / "decoder_opt.onnx";
+		if (std::filesystem::exists(fallbackPath)) {
+			backend = std::make_unique<vqvdb::DecoderBackend>();
+			initResult = backend->init(fallbackPath, kDefaultDecoderMaxBatchSize);
+			if (initResult.has_value()) {
+				readyPath = fallbackPath;
+			}
+		}
+	}
+
+	if (!initResult.has_value()) {
+		result.success = false;
+		result.errorMessage = std::format("Decoder init failed: {}", vqvdb::errorToString(initResult.error()));
+		if (!primaryFailureDetails.empty()) {
+			result.errorMessage += std::format(" | primary: {}", primaryFailureDetails);
+		}
+		const std::string details = backend->lastErrorMessage();
+		if (!details.empty()) {
+			result.errorMessage += std::format(" | details: {}", details);
+		}
+		return result;
+	}
+
+	result.success = true;
+	result.readyModelPath = readyPath.string();
+	result.backend = std::move(backend);
+	return result;
+}
+
 std::string formatKB(size_t bytes) {
 	const float kb = static_cast<float>(bytes) / 1024.0f;
 	return std::format("{:.2f} KB", kb);
@@ -243,10 +326,12 @@ void renderBrickCacheHeatmap(UIState& state) {
 	}
 
 	const vqvdb::BrickCacheStats stats = vqvdb::getCacheStats(gpu.brickCache);
-	ImGui::Text("Resident: %u / %u  (%.1f%%)", stats.residentBricks, stats.capacitySlots,
-	            (stats.capacitySlots > 0) ? (100.0f * static_cast<float>(stats.residentBricks) / static_cast<float>(stats.capacitySlots)) : 0.0f);
+	ImGui::Text(
+	    "Resident: %u / %u  (%.1f%%)", stats.residentBricks, stats.capacitySlots,
+	    (stats.capacitySlots > 0) ? (100.0f * static_cast<float>(stats.residentBricks) / static_cast<float>(stats.capacitySlots)) : 0.0f);
 	ImGui::Text("Lookups: %llu  Hits: %llu  Hit rate: %.1f%%  Evictions: %llu", static_cast<unsigned long long>(stats.lookupCount),
-	            static_cast<unsigned long long>(stats.hitCount), 100.0f * stats.hitRate, static_cast<unsigned long long>(stats.evictionCount));
+	            static_cast<unsigned long long>(stats.hitCount), 100.0f * stats.hitRate,
+	            static_cast<unsigned long long>(stats.evictionCount));
 
 	const char* modes[] = {"Least Used (Age)", "Least Used (Touches)", "LRU Tail Rank"};
 	gpu.brickCacheHeatmapMode = std::clamp(gpu.brickCacheHeatmapMode, 0, 2);
@@ -271,7 +356,8 @@ void renderBrickCacheHeatmap(UIState& state) {
 	const ImVec2 canvasSize(cellW * static_cast<float>(sx), cellH * static_cast<float>(sy));
 	ImGui::InvisibleButton("brickCacheHeatmapCanvas", canvasSize);
 	ImDrawList* draw = ImGui::GetWindowDrawList();
-	draw->AddRectFilled(start, ImVec2(start.x + canvasSize.x, start.y + canvasSize.y), ImGui::GetColorU32(ImVec4(0.07f, 0.07f, 0.09f, 1.0f)));
+	draw->AddRectFilled(start, ImVec2(start.x + canvasSize.x, start.y + canvasSize.y),
+	                    ImGui::GetColorU32(ImVec4(0.07f, 0.07f, 0.09f, 1.0f)));
 	draw->AddRect(start, ImVec2(start.x + canvasSize.x, start.y + canvasSize.y), ImGui::GetColorU32(ImVec4(0.25f, 0.25f, 0.3f, 1.0f)));
 
 	std::optional<uint32_t> hoveredSlot;
@@ -288,7 +374,8 @@ void renderBrickCacheHeatmap(UIState& state) {
 			if (info.occupied) {
 				switch (gpu.brickCacheHeatmapMode) {
 					case 0: {
-						const uint64_t age = (snapshot.accessCounter >= info.lastAccessCounter) ? (snapshot.accessCounter - info.lastAccessCounter) : 0ull;
+						const uint64_t age =
+						    (snapshot.accessCounter >= info.lastAccessCounter) ? (snapshot.accessCounter - info.lastAccessCounter) : 0ull;
 						norm = (snapshot.maxAge > 0) ? static_cast<float>(age) / static_cast<float>(snapshot.maxAge) : 0.0f;
 						break;
 					}
@@ -327,7 +414,8 @@ void renderBrickCacheHeatmap(UIState& state) {
 		if (info.occupied) {
 			ImGui::Text("Morton: %llu", static_cast<unsigned long long>(info.mortonCode));
 			ImGui::Text("Touches: %u", info.touchCount);
-			const uint64_t age = (snapshot.accessCounter >= info.lastAccessCounter) ? (snapshot.accessCounter - info.lastAccessCounter) : 0ull;
+			const uint64_t age =
+			    (snapshot.accessCounter >= info.lastAccessCounter) ? (snapshot.accessCounter - info.lastAccessCounter) : 0ull;
 			ImGui::Text("Age: %llu", static_cast<unsigned long long>(age));
 			if (info.lruRank != 0xFFFFFFFFu) {
 				ImGui::Text("LRU rank: %u (0 = MRU)", info.lruRank);
@@ -348,29 +436,6 @@ void renderLeftPanel(UIState& state, CameraState& camera, CameraLimits& limits) 
 
 			if (ImGui::Button("Load VQVDB File...", ImVec2(-1, 0))) {
 				state.fileLoadRequested = true;
-			}
-
-			sectionHeader("Codebook");
-			const bool cbLoaded = state.gpuState.codebookLoaded;
-			const bool cbOnGpu = state.gpuState.codebookUploaded;
-			if (ImGui::BeginTable("cbQuick", 2, ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_BordersInnerV)) {
-				tableStatusRow("CPU", cbLoaded ? "Loaded" : "Missing", cbLoaded ? colorOk() : colorWarn());
-				tableStatusRow("GPU", cbOnGpu ? "Uploaded" : "Not uploaded", cbOnGpu ? colorOk() : colorWarn());
-				ImGui::EndTable();
-			}
-
-			if (ImGui::Button("Load / Upload Codebook", ImVec2(-1, 0))) {
-				state.gpuState.codebookLoadRequested = true;
-			}
-			if (cbOnGpu && !state.gpuState.codebookVerified) {
-				if (ImGui::Button("Verify Codebook on GPU", ImVec2(-1, 0))) {
-					state.gpuState.codebookVerifyRequested = true;
-				}
-			}
-
-			if (!state.gpuState.codebookError.empty()) {
-				ImGui::TextColored(colorError(), "Codebook error:");
-				ImGui::TextWrapped("%s", state.gpuState.codebookError.c_str());
 			}
 
 			sectionHeader("Blocks");
@@ -455,16 +520,12 @@ void renderGpuDebugPanel(UIState& state) {
 	if (ImGui::Begin("GPU Debug")) {
 		auto& gpu = state.gpuState;
 		const auto memStats = vqvdb::getGPUMemoryStats(gpu.resources);
-		const bool cbReady = gpu.codebookUploaded;
-		const bool cbVerified = gpu.codebookVerified && gpu.codebookVerification.passed;
 		const bool blocksReady = gpu.blockIndicesUploaded;
 		const bool blocksVerified = gpu.blockIndicesVerified && gpu.blockIndicesVerification.passed;
 		const bool metadataVerified = !gpu.blockMetadataUploaded || (gpu.blockMetadataVerified && gpu.blockMetadataVerification.passed);
 
 		sectionHeader("Summary");
 		if (ImGui::BeginTable("gpuSummary", 2, ImGuiTableFlags_SizingStretchSame)) {
-			tableStatusRow("Codebook", cbReady ? (cbVerified ? "Verified" : "Uploaded") : "Missing",
-			               cbReady ? (cbVerified ? colorOk() : colorWarn()) : colorError());
 			tableStatusRow("Blocks", blocksReady ? (blocksVerified && metadataVerified ? "Verified" : "Uploaded") : "Missing",
 			               blocksReady ? (blocksVerified && metadataVerified ? colorOk() : colorWarn()) : colorError());
 			tableStatusRow("Renderer", gpu.rendererNeedsUpdate ? "Pending update" : "Ready",
@@ -474,38 +535,12 @@ void renderGpuDebugPanel(UIState& state) {
 
 		sectionHeader("Memory");
 		if (ImGui::BeginTable("gpuMemory", 2, ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchSame)) {
-			tableStatRow("Codebook", formatKB(memStats.codebookBytes).c_str());
 			tableStatRow("Block indices", formatKB(memStats.blockIndicesBytes).c_str());
 			tableStatRow("Block origins", formatKB(memStats.blockOriginsBytes).c_str());
 			tableStatRow("Block metadata", formatKB(memStats.blockMetadataBytes).c_str());
 			tableStatRow("Decoder weights", formatKB(memStats.decoderWeightsBytes).c_str());
 			tableStatRow("Total", formatKB(memStats.totalBytes).c_str());
 			ImGui::EndTable();
-		}
-
-		sectionHeader("Codebook");
-		if (gpu.codebookLoaded && gpu.codebook.has_value()) {
-			ImGui::Text("Dims: %u x %u", gpu.codebook->numEmbeddings, gpu.codebook->embeddingDim);
-		} else {
-			ImGui::TextColored(colorWarn(), "CPU copy missing");
-		}
-
-		if (ImGui::Button("Load / Upload Codebook", ImVec2(-1, 0))) {
-			gpu.codebookLoadRequested = true;
-		}
-		if (cbReady && !cbVerified) {
-			if (ImGui::Button("Verify Codebook Readback", ImVec2(-1, 0))) {
-				gpu.codebookVerifyRequested = true;
-			}
-		}
-		if (gpu.codebookVerified) {
-			ImGui::TextColored(cbVerified ? colorOk() : colorError(), "Verification: %s", cbVerified ? "PASSED" : "FAILED");
-			if (!gpu.codebookVerification.message.empty()) {
-				ImGui::TextWrapped("%s", gpu.codebookVerification.message.c_str());
-			}
-		}
-		if (!gpu.codebookError.empty()) {
-			ImGui::TextColored(colorError(), "%s", gpu.codebookError.c_str());
 		}
 
 		sectionHeader("Blocks");
@@ -551,6 +586,29 @@ void renderGpuDebugPanel(UIState& state) {
 			ImGui::Text("Showing all %zu blocks", gpu.resources.numBlocks);
 		}
 
+		sectionHeader("Decoder");
+		gpu.decoderReady = gpu.decoderBackend != nullptr && gpu.decoderBackend->isReady();
+		ImGui::TextWrapped("Model path: %s", gpu.decoderModelPath.c_str());
+		if (gpu.decoderInitInProgress) {
+			ImGui::BeginDisabled();
+		}
+		if (ImGui::Button(gpu.decoderReady ? "Reinitialize Decoder" : "Initialize Decoder", ImVec2(-1, 0))) {
+			gpu.decoderInitRequested = true;
+		}
+		if (gpu.decoderInitInProgress) {
+			ImGui::EndDisabled();
+		}
+
+		const ImVec4 decoderStatusColor = gpu.decoderInitInProgress ? colorMuted() : (gpu.decoderReady ? colorOk() : colorWarn());
+		const char* decoderSummary = gpu.decoderInitInProgress ? "initializing" : (gpu.decoderReady ? "ready" : "not ready");
+		ImGui::TextColored(decoderStatusColor, "Decoder status: %s", decoderSummary);
+		if (!gpu.decoderStatus.empty()) {
+			ImGui::TextWrapped("%s", gpu.decoderStatus.c_str());
+		}
+		if (!gpu.decoderError.empty()) {
+			ImGui::TextColored(colorError(), "%s", gpu.decoderError.c_str());
+		}
+
 		sectionHeader("Visibility Scheduler");
 		ImGui::Checkbox("Enable frustum culling", &gpu.enableFrustumCulling);
 		ImGui::Checkbox("Enable depth occlusion (Hi-Z)", &gpu.enableDepthOcclusion);
@@ -564,8 +622,10 @@ void renderGpuDebugPanel(UIState& state) {
 		if (gpu.maxDecodeDistance <= 0.0f) {
 			ImGui::TextColored(colorMuted(), "Distance limit: disabled");
 		}
-		ImGui::Text("Visible: %u (cached=%u, missing=%u)", gpu.visibleBlocksLastFrame, gpu.visibleCachedLastFrame, gpu.visibleMissingLastFrame);
+		ImGui::Text("Visible: %u (cached=%u, missing=%u)", gpu.visibleBlocksLastFrame, gpu.visibleCachedLastFrame,
+		            gpu.visibleMissingLastFrame);
 		ImGui::Text("Scheduled decodes: %u (occluded filtered=%u)", gpu.scheduledDecodesLastFrame, gpu.occludedRequestsLastFrame);
+		ImGui::Text("Decoded this frame: %u", gpu.decodedBlocksLastFrame);
 		ImGui::Text("Cache update: touched=%u, inserted=%u, evicted=%u", gpu.cacheTouchedLastFrame, gpu.cacheInsertedLastFrame,
 		            gpu.cacheEvictedLastFrame);
 		if (!gpu.schedulerError.empty()) {
@@ -607,7 +667,7 @@ void renderGpuDebugPanel(UIState& state) {
 			ImGui::TextColored(colorWarn(), "Last load error:");
 			ImGui::TextWrapped("%s", state.volumeState.loadError.c_str());
 		}
-		if (!gpu.codebookError.empty() || !gpu.blockDataError.empty()) {
+		if (!gpu.blockDataError.empty()) {
 			ImGui::TextColored(colorWarn(), "GPU errors are also shown above.");
 		}
 	}
@@ -712,14 +772,6 @@ void renderBottomPanel(UIState& state) {
 							}
 						}
 						ImGui::TreePop();
-					}
-
-					const auto& cb = vol.file->codebook;
-					sectionHeader("Embedded Codebook");
-					if (cb.empty()) {
-						ImGui::TextColored(colorWarn(), "Not embedded. Load external codebook via left/right panels.");
-					} else {
-						ImGui::Text("Dims: %d x %d (%s)", cb.numEmbeddings, cb.embeddingDim, formatKB(cb.sizeBytes()).c_str());
 					}
 
 				} else if (!vol.loadError.empty()) {
@@ -866,77 +918,6 @@ bool loadVQVDBFile(UIState& state, const std::string& filePath) noexcept {
 	}
 
 	return true;
-}
-
-bool loadAndUploadCodebook(UIState& state, const std::string& filePath) noexcept {
-	auto& gpu = state.gpuState;
-
-	// Clear previous codebook state
-	gpu.codebookLoaded = false;
-	gpu.codebookUploaded = false;
-	gpu.codebookVerified = false;
-	gpu.codebookError.clear();
-	gpu.codebookVerification = {};
-
-	logMessage(state, "Loading codebook: " + filePath);
-
-	// Load from file
-	auto result = vqvdb::loadCodebookFile(filePath);
-	if (!result.has_value()) {
-		gpu.codebookError = std::format("Load failed: {}", vqvdb::errorToString(result.error()));
-		logMessage(state, "ERROR: " + gpu.codebookError);
-		return false;
-	}
-
-	gpu.codebook = std::move(*result);
-	gpu.codebookPath = filePath;
-	gpu.codebookLoaded = true;
-
-	logMessage(state, std::format("Codebook loaded: {} x {} ({:.2f} KB)", gpu.codebook->numEmbeddings, gpu.codebook->embeddingDim,
-	                              static_cast<float>(gpu.codebook->sizeBytes()) / 1024.0f));
-
-	// Upload to GPU
-	logMessage(state, "Uploading codebook to GPU...");
-	vqvdb::GPUResult<void> uploadResult;
-	{
-		TRANSFER_PROFILE_SCOPE(state.profiler, "Transfer Codebook CPU->GPU", gpu.codebook->sizeBytes(),
-		                       profiler::TransferDirection::CPUToGPU);
-		uploadResult = vqvdb::uploadCodebook(gpu.resources, *gpu.codebook);
-	}
-	if (!uploadResult.has_value()) {
-		gpu.codebookError = std::format("GPU upload failed: {}", vqvdb::errorToString(uploadResult.error()));
-		logMessage(state, "ERROR: " + gpu.codebookError);
-		return false;
-	}
-
-	gpu.codebookUploaded = true;
-	logMessage(state, "Codebook uploaded to GPU successfully");
-
-	return true;
-}
-
-void verifyCodebookOnGPU(UIState& state) noexcept {
-	auto& gpu = state.gpuState;
-
-	if (!gpu.codebookUploaded || !gpu.codebook.has_value()) {
-		gpu.codebookError = "Cannot verify: codebook not uploaded";
-		return;
-	}
-
-	logMessage(state, "Verifying codebook on GPU via readback...");
-	{
-		TRANSFER_PROFILE_SCOPE(state.profiler, "Transfer Codebook GPU->CPU", gpu.codebook->sizeBytes(),
-		                       profiler::TransferDirection::GPUToCPU);
-		gpu.codebookVerification = vqvdb::verifyCodebook(gpu.resources, *gpu.codebook);
-	}
-	gpu.codebookVerified = true;
-
-	if (gpu.codebookVerification.passed) {
-		logMessage(state, std::format("Codebook verification PASSED: {} elements, max error = {:.2e}",
-		                              gpu.codebookVerification.testedElements, gpu.codebookVerification.maxError));
-	} else {
-		logMessage(state, "ERROR: " + gpu.codebookVerification.message);
-	}
 }
 
 bool uploadBlockDataToGPU(UIState& state) noexcept {
@@ -1128,7 +1109,7 @@ void primeBrickCacheFromLoadedBlocks(UIState& state) noexcept {
 	const size_t count = std::min<size_t>(static_cast<size_t>(std::max(1, gpu.brickCachePrimeCount)), origins.size());
 	size_t inserted = 0;
 	for (size_t i = 0; i < count; ++i) {
-		const auto alloc = vqvdb::allocateSlot(gpu.brickCache, origins[i]);
+		const auto alloc = vqvdb::allocateSlot(gpu.brickCache, vqvdb::encodeMorton64(origins[i]));
 		if (!alloc.has_value()) {
 			gpu.brickCacheError = std::format("Cache prime failed at block {}: {}", i, vqvdb::errorToString(alloc.error()));
 			logMessage(state, "ERROR: " + gpu.brickCacheError);
@@ -1153,11 +1134,97 @@ void primeBrickCacheFromLoadedBlocks(UIState& state) noexcept {
 void initGPUResources(UIState& state) noexcept {
 	logMessage(state, "Initializing GPU resources...");
 	vqvdb::initGPUResources(state.gpuState.resources);
+	state.gpuState.decoderModelPath = kDefaultDecoderModelPath;
+	state.gpuState.decoderBackend.reset();
+	state.gpuState.decoderInitInProgress = false;
+	state.gpuState.decoderReady = false;
+	state.gpuState.decoderStatus = "Not initialized";
+	state.gpuState.decoderError.clear();
+	state.gpuState.decodedBlocksLastFrame = 0;
 	(void)reinitBrickCache(state);
 	logMessage(state, "GPU resources initialized");
 }
 
+bool initDecoderBackend(UIState& state) noexcept {
+	auto& gpu = state.gpuState;
+	if (gpu.decoderInitInProgress) {
+		return false;
+	}
+
+	const std::filesystem::path resolvedPath = resolveDecoderModelPath(gpu.decoderModelPath);
+	gpu.decoderError.clear();
+	gpu.decoderStatus = std::format("Initializing ({})", resolvedPath.string());
+	gpu.decoderInitInProgress = true;
+	logMessage(state, std::format("Initializing decoder backend in background: {}", resolvedPath.string()));
+	try {
+		gpu.decoderInitTask = std::async(std::launch::async, [resolvedPath]() { return runDecoderInitTask(resolvedPath); });
+	} catch (const std::exception& e) {
+		gpu.decoderInitInProgress = false;
+		gpu.decoderStatus = "Initialization failed";
+		gpu.decoderError = std::format("Failed to launch decoder initialization task: {}", e.what());
+		logMessage(state, "ERROR: " + gpu.decoderError);
+		return false;
+	}
+	return true;
+}
+
+void pollDecoderBackendInit(UIState& state) noexcept {
+	auto& gpu = state.gpuState;
+	if (!gpu.decoderInitInProgress || !gpu.decoderInitTask.valid()) {
+		return;
+	}
+
+	if (gpu.decoderInitTask.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
+		return;
+	}
+
+	DecoderInitTaskResult result{};
+	try {
+		result = gpu.decoderInitTask.get();
+	} catch (const std::exception& e) {
+		gpu.decoderInitInProgress = false;
+		gpu.decoderReady = gpu.decoderBackend != nullptr && gpu.decoderBackend->isReady();
+		gpu.decoderStatus = "Initialization failed";
+		gpu.decoderError = std::format("Decoder initialization task failed: {}", e.what());
+		logMessage(state, "ERROR: " + gpu.decoderError);
+		return;
+	}
+	gpu.decoderInitInProgress = false;
+	if (!result.success || result.backend == nullptr) {
+		gpu.decoderReady = gpu.decoderBackend != nullptr && gpu.decoderBackend->isReady();
+		gpu.decoderStatus = "Initialization failed";
+		gpu.decoderError = result.errorMessage.empty() ? "Decoder init failed" : result.errorMessage;
+		logMessage(state, "ERROR: " + gpu.decoderError);
+		return;
+	}
+
+	gpu.decoderBackend = std::move(result.backend);
+	gpu.decoderReady = gpu.decoderBackend->isReady();
+	gpu.decoderStatus = std::format("Ready ({})", result.readyModelPath);
+	gpu.decoderError.clear();
+	logMessage(state, "Decoder backend ready");
+}
+
+void shutdownDecoderBackend(UIState& state) noexcept {
+	auto& gpu = state.gpuState;
+	if (gpu.decoderInitTask.valid()) {
+		try {
+			gpu.decoderInitTask.wait();
+			(void)gpu.decoderInitTask.get();
+		} catch (...) {
+			// Swallow task teardown failures during shutdown.
+		}
+	}
+	gpu.decoderInitInProgress = false;
+	gpu.decoderBackend.reset();
+	gpu.decoderReady = false;
+	gpu.decoderStatus = "Not initialized";
+	gpu.decoderError.clear();
+	gpu.decodedBlocksLastFrame = 0;
+}
+
 void shutdownGPUResources(UIState& state) noexcept {
+	shutdownDecoderBackend(state);
 	vqvdb::shutdownBrickCache(state.gpuState.brickCache);
 	state.gpuState.brickCacheInitialized = false;
 	vqvdb::shutdownGPUResources(state.gpuState.resources);

@@ -121,42 +121,50 @@ std::optional<uint32_t> probeHashTable(std::span<const vqvdb::CacheHashEntry> ta
 
 }  // namespace
 
-TEST_CASE("Brick cache computes atlas dimensions and slot offsets") {
+// RAII test fixture for BrickCache initialization
+struct BrickCacheFixture {
 	vqvdb::BrickCache cache;
-	vqvdb::BrickCacheConfig config;
-	config.capacitySlots = 2048;
-	config.brickSizeVoxels = 8;
-	config.allocateAtlasTexture = false;
 
-	const auto init = vqvdb::initBrickCache(cache, config);
-	REQUIRE(init.has_value());
+	explicit BrickCacheFixture(uint32_t capacity = 2048, bool allocateTexture = false) {
+		vqvdb::BrickCacheConfig config;
+		config.capacitySlots = capacity;
+		config.allocateAtlasTexture = allocateTexture;
+		const auto result = vqvdb::initBrickCache(cache, config);
+		REQUIRE(result.has_value());
+	}
 
-	CHECK(cache.slotGridDims.x == 16);
-	CHECK(cache.slotGridDims.y == 16);
-	CHECK(cache.slotGridDims.z == 8);
-	CHECK(cache.atlasDimsVoxels.x == 128);
-	CHECK(cache.atlasDimsVoxels.y == 128);
-	CHECK(cache.atlasDimsVoxels.z == 64);
+	~BrickCacheFixture() {
+		vqvdb::shutdownBrickCache(cache);
+	}
+};
 
-	const auto off0 = vqvdb::slotToAtlasOffset(cache, 0);
+TEST_CASE("Brick cache computes atlas dimensions and slot offsets") {
+	BrickCacheFixture fixture(2048, false);
+
+	CHECK(fixture.cache.slotGridDims.x == 16);
+	CHECK(fixture.cache.slotGridDims.y == 16);
+	CHECK(fixture.cache.slotGridDims.z == 8);
+	CHECK(fixture.cache.atlasDimsVoxels.x == 128);
+	CHECK(fixture.cache.atlasDimsVoxels.y == 128);
+	CHECK(fixture.cache.atlasDimsVoxels.z == 64);
+
+	const auto off0 = vqvdb::slotToAtlasOffset(fixture.cache, 0);
 	REQUIRE(off0.has_value());
 	CHECK(off0->x == 0);
 	CHECK(off0->y == 0);
 	CHECK(off0->z == 0);
 
-	const auto off17 = vqvdb::slotToAtlasOffset(cache, 17);
+	const auto off17 = vqvdb::slotToAtlasOffset(fixture.cache, 17);
 	REQUIRE(off17.has_value());
 	CHECK(off17->x == 8);
 	CHECK(off17->y == 8);
 	CHECK(off17->z == 0);
 
-	const auto offLast = vqvdb::slotToAtlasOffset(cache, 2047);
+	const auto offLast = vqvdb::slotToAtlasOffset(fixture.cache, 2047);
 	REQUIRE(offLast.has_value());
 	CHECK(offLast->x == 120);
 	CHECK(offLast->y == 120);
 	CHECK(offLast->z == 56);
-
-	vqvdb::shutdownBrickCache(cache);
 }
 
 TEST_CASE("Brick cache evicts LRU entry after access updates recency") {

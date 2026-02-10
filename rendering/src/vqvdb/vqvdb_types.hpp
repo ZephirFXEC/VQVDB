@@ -57,7 +57,6 @@ enum class CodebookError { FileNotFound, FileOpenFailed, InvalidMagic, HeaderRea
 
 /// Error codes for decoder backend operations
 enum class DecoderError {
-	None,
 	EngineNotLoaded,
 	OnnxModelNotFound,
 	EngineBuildFailed,

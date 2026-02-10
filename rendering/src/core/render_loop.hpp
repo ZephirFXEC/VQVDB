@@ -38,6 +38,7 @@ class RenderLoop {
 	UIState& uiRef;
 	std::vector<uint32_t> blockDebugStates;
 	size_t lastDebugStateBlockCount{0};
+	bool blockDebugStateUploaded{false};
 	depth_pyramid::DepthPyramid previousDepthPyramid;
 	depth_pyramid::AsyncDepthReadback depthReadback;
 };

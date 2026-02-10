@@ -1,6 +1,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -11,6 +12,12 @@
 
 #include "vqvdb/cuda_gl_interop.hpp"
 #include "vqvdb/decoder_backend.hpp"
+
+#if defined(VQVDB_DECODER_TEST_GL_CONTEXT)
+#include <glad/glad.h>
+#define GLFW_INCLUDE_NONE
+#include <GLFW/glfw3.h>
+#endif
 
 namespace {
 
@@ -160,6 +167,45 @@ OnnxRoundTripResult runOnnxRoundTripWithPython(const std::filesystem::path& enco
 
 	return {.executed = false, .details = output.empty() ? "no round-trip result produced" : output};
 }
+
+#if defined(VQVDB_DECODER_TEST_GL_CONTEXT)
+struct GLContextFixture {
+	GLFWwindow* window{nullptr};
+	bool ready{false};
+
+	GLContextFixture() {
+		if (!glfwInit()) {
+			return;
+		}
+
+		glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
+		glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+		glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6);
+		window = glfwCreateWindow(64, 64, "vqvdb_decoder_test", nullptr, nullptr);
+		if (window == nullptr) {
+			glfwTerminate();
+			return;
+		}
+
+		glfwMakeContextCurrent(window);
+		if (!gladLoadGLLoader(reinterpret_cast<GLADloadproc>(glfwGetProcAddress))) {
+			glfwDestroyWindow(window);
+			window = nullptr;
+			glfwTerminate();
+			return;
+		}
+
+		ready = true;
+	}
+
+	~GLContextFixture() {
+		if (window != nullptr) {
+			glfwDestroyWindow(window);
+		}
+		glfwTerminate();
+	}
+};
+#endif
 
 #if defined(VQVDB_RENDERING_ENABLE_TRT)
 constexpr vqvdb::DecoderError expectedInteropValidationError() { return vqvdb::DecoderError::InvalidInput; }
@@ -348,5 +394,56 @@ TEST_CASE("Decoder backend decodeBatch with real model") {
 	const auto result = backend.decodeBatch(indices, 1, 0, offsets);
 	CHECK(result.error() == vqvdb::DecoderError::InvalidInput);
 }
+
+#if defined(VQVDB_DECODER_TEST_GL_CONTEXT)
+TEST_CASE("Decoder backend decode writes atlas data for one block") {
+	GLContextFixture glContext;
+	if (!glContext.ready) {
+		INFO("Skipping decoder atlas write test: GL context unavailable");
+		return;
+	}
+
+	vqvdb::DecoderBackend backend;
+	const auto modelPath = findOnnxModelPath("decoder.onnx");
+	if (modelPath.empty()) {
+		INFO("decoder.onnx not found under models/onnx_models");
+		return;
+	}
+
+	const auto initResult = backend.init(modelPath, 8);
+	if (!initResult.has_value()) {
+		CHECK(isRuntimeInitFailure(initResult.error()));
+		INFO("TensorRT init unavailable in this environment: " << vqvdb::errorToString(initResult.error()));
+		return;
+	}
+	REQUIRE(backend.isReady());
+
+	GLuint atlasTexture = 0;
+	glCreateTextures(GL_TEXTURE_3D, 1, &atlasTexture);
+	REQUIRE(atlasTexture != 0);
+	glTextureStorage3D(atlasTexture, 1, GL_R32F, 8, 8, 8);
+	const float zero = 0.0f;
+	glClearTexImage(atlasTexture, 0, GL_RED, GL_FLOAT, &zero);
+
+	std::vector<uint8_t> indices(64, 0);
+	std::vector<glm::ivec3> offsets{glm::ivec3(0, 0, 0)};
+	const auto decodeResult = backend.decodeBatch(indices, 1, atlasTexture, offsets);
+
+	if (!decodeResult.has_value()) {
+		CHECK(decodeResult.error() == vqvdb::DecoderError::CudaError || decodeResult.error() == vqvdb::DecoderError::InferenceFailed ||
+		      decodeResult.error() == vqvdb::DecoderError::InteropError);
+		glDeleteTextures(1, &atlasTexture);
+		INFO("Skipping atlas write verification due runtime decode failure: " << vqvdb::errorToString(decodeResult.error()));
+		return;
+	}
+
+	std::vector<float> voxels(8 * 8 * 8, 0.0f);
+	glGetTextureImage(atlasTexture, 0, GL_RED, GL_FLOAT, static_cast<GLsizei>(voxels.size() * sizeof(float)), voxels.data());
+	glDeleteTextures(1, &atlasTexture);
+
+	const bool hasNonZeroVoxel = std::any_of(voxels.begin(), voxels.end(), [](float v) { return std::fabs(v) > 1e-6f; });
+	CHECK(hasNonZeroVoxel);
+}
+#endif
 
 #endif  // VQVDB_RENDERING_ENABLE_TRT

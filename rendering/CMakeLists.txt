@@ -32,14 +32,27 @@ if (VQVDB_RENDERING_ENABLE_TRT)
     find_path(TENSORRT_INCLUDE_DIR NvInfer.h
             HINTS ENV TensorRT_ROOT
             PATH_SUFFIXES include)
-    find_library(TENSORRT_NVINFER_LIB nvinfer nvinfer_10
+    find_library(TENSORRT_NVINFER_LIB nvinfer
             HINTS ENV TensorRT_ROOT
-            PATH_SUFFIXES lib lib64)
-    find_library(TENSORRT_NVONNXPARSER_LIB nvonnxparser nvonnxparser_10
+            PATH_SUFFIXES lib)
+    find_library(TENSORRT_NVONNXPARSER_LIB nvonnxparser
             HINTS ENV TensorRT_ROOT
-            PATH_SUFFIXES lib lib64)
+            PATH_SUFFIXES lib)
     if (NOT TENSORRT_INCLUDE_DIR OR NOT TENSORRT_NVINFER_LIB OR NOT TENSORRT_NVONNXPARSER_LIB)
         message(FATAL_ERROR "TensorRT not found. Set TensorRT_ROOT or disable VQVDB_RENDERING_ENABLE_TRT.")
+    endif ()
+
+    # Find TensorRT DLLs for runtime
+    if (WIN32)
+        find_file(TENSORRT_NVINFER_DLL nvinfer.dll
+                HINTS ENV TensorRT_ROOT
+                PATH_SUFFIXES bin lib)
+        find_file(TENSORRT_NVONNXPARSER_DLL nvonnxparser.dll
+                HINTS ENV TensorRT_ROOT
+                PATH_SUFFIXES bin lib)
+        if (NOT TENSORRT_NVINFER_DLL OR NOT TENSORRT_NVONNXPARSER_DLL)
+            message(WARNING "TensorRT DLLs not found. Runtime may fail if DLLs are not in PATH.")
+        endif ()
     endif ()
 endif ()
 
@@ -61,7 +74,6 @@ if (VQVDB_RENDERING_BUILD_VIEWER)
             src/ui/profiler_ui.cpp
             src/vqvdb/vqvdb_types.cpp
             src/vqvdb/vqvdb_loader.cpp
-            src/vqvdb/codebook_loader.cpp
             src/vqvdb/gpu_resources.cpp
             src/vqvdb/decoder_backend.cpp
             src/vqvdb/cuda_gl_interop.cpp
@@ -87,6 +99,22 @@ if (VQVDB_RENDERING_BUILD_VIEWER)
                 ${TENSORRT_NVINFER_LIB}
                 ${TENSORRT_NVONNXPARSER_LIB}
         )
+
+        # Copy TensorRT DLLs to output directory on Windows
+        if (WIN32 AND TENSORRT_NVINFER_DLL AND TENSORRT_NVONNXPARSER_DLL)
+            add_custom_command(TARGET vqvdb_rendering_viewer POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${TENSORRT_NVINFER_DLL}"
+                    "$<TARGET_FILE_DIR:vqvdb_rendering_viewer>"
+                    COMMENT "Copying nvinfer.dll to output directory"
+            )
+            add_custom_command(TARGET vqvdb_rendering_viewer POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${TENSORRT_NVONNXPARSER_DLL}"
+                    "$<TARGET_FILE_DIR:vqvdb_rendering_viewer>"
+                    COMMENT "Copying nvonnxparser.dll to output directory"
+            )
+        endif ()
     endif ()
 
     target_include_directories(vqvdb_rendering_viewer
@@ -141,6 +169,29 @@ if (VQVDB_RENDERING_BUILD_TESTS)
                 ${TENSORRT_NVINFER_LIB}
                 ${TENSORRT_NVONNXPARSER_LIB}
         )
+        if (TARGET OpenGL::GL AND TARGET glfw)
+            target_compile_definitions(vqvdb_rendering_decoder_unit_tests PRIVATE VQVDB_DECODER_TEST_GL_CONTEXT)
+            target_link_libraries(vqvdb_rendering_decoder_unit_tests PRIVATE
+                    OpenGL::GL
+                    glfw
+            )
+        endif ()
+
+        # Copy TensorRT DLLs to output directory on Windows
+        if (WIN32 AND TENSORRT_NVINFER_DLL AND TENSORRT_NVONNXPARSER_DLL)
+            add_custom_command(TARGET vqvdb_rendering_decoder_unit_tests POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${TENSORRT_NVINFER_DLL}"
+                    "$<TARGET_FILE_DIR:vqvdb_rendering_decoder_unit_tests>"
+                    COMMENT "Copying nvinfer.dll to test output directory"
+            )
+            add_custom_command(TARGET vqvdb_rendering_decoder_unit_tests POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${TENSORRT_NVONNXPARSER_DLL}"
+                    "$<TARGET_FILE_DIR:vqvdb_rendering_decoder_unit_tests>"
+                    COMMENT "Copying nvonnxparser.dll to test output directory"
+            )
+        endif ()
     endif ()
 
     doctest_discover_tests(vqvdb_rendering_decoder_unit_tests)

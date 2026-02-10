@@ -15,7 +15,6 @@
 #include <string>
 #include <vector>
 
-#include "vqvdb/codebook_loader.hpp"
 #include "vqvdb/vqvdb_types.hpp"
 
 namespace vqvdb {

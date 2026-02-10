@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <memory>
 #include <span>
+#include <string>
 
 #include <glm/glm.hpp>
 
@@ -32,6 +33,7 @@ class DecoderBackend {
 
 	[[nodiscard]] bool isReady() const noexcept;
 	[[nodiscard]] const char* name() const noexcept { return "TensorRT"; }
+	[[nodiscard]] const std::string& lastErrorMessage() const noexcept;
 
    private:
 	struct Impl;

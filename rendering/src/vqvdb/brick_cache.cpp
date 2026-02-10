@@ -121,7 +121,6 @@ void resetCacheState(BrickCache& cache) {
 	cache.lruHead = -1;
 	cache.lruTail = -1;
 
-	cache.residentCount = 0;
 	cache.lookupCount = 0;
 	cache.hitCount = 0;
 	cache.evictionCount = 0;
@@ -203,27 +202,9 @@ void shutdownBrickCache(BrickCache& cache) noexcept {
 
 	if (cache.atlasTexture != 0) {
 		glDeleteTextures(1, &cache.atlasTexture);
-		cache.atlasTexture = 0;
 	}
 
-	cache.atlasDimsVoxels = {0, 0, 0};
-	cache.slotGridDims = {0, 0, 0};
-	cache.brickSizeVoxels = kBlockSize;
-	cache.capacitySlots = 0;
-	cache.residentCount = 0;
-	cache.mortonToSlot.clear();
-	cache.slotToMorton.clear();
-	cache.freeSlots.clear();
-	cache.lruPrev.clear();
-	cache.lruNext.clear();
-	cache.lruHead = -1;
-	cache.lruTail = -1;
-	cache.lookupCount = 0;
-	cache.hitCount = 0;
-	cache.evictionCount = 0;
-	cache.accessCounter = 0;
-	cache.slotTouchCount.clear();
-	cache.slotLastAccess.clear();
+	cache = BrickCache{};
 }
 
 GPUResult<std::optional<uint32_t>> lookupBrick(BrickCache& cache, uint64_t mortonCode) noexcept {
@@ -241,10 +222,6 @@ GPUResult<std::optional<uint32_t>> lookupBrick(BrickCache& cache, uint64_t morto
 	touchLRUSlot(cache, static_cast<int32_t>(it->second));
 	touchSlotTelemetry(cache, it->second);
 	return std::optional<uint32_t>{it->second};
-}
-
-GPUResult<std::optional<uint32_t>> lookupBrick(BrickCache& cache, const BlockOrigin& origin) noexcept {
-	return lookupBrick(cache, encodeMorton64(origin));
 }
 
 GPUResult<BrickAllocation> allocateSlot(BrickCache& cache, uint64_t mortonCode) noexcept {
@@ -283,13 +260,8 @@ GPUResult<BrickAllocation> allocateSlot(BrickCache& cache, uint64_t mortonCode) 
 	cache.slotToMorton[static_cast<size_t>(allocation.slotIndex)] = mortonCode;
 	pushLRUFront(cache, static_cast<int32_t>(allocation.slotIndex));
 	touchSlotTelemetry(cache, allocation.slotIndex);
-	cache.residentCount = static_cast<uint32_t>(cache.mortonToSlot.size());
 	cache.hashTableDirty = true;
 	return allocation;
-}
-
-GPUResult<BrickAllocation> allocateSlot(BrickCache& cache, const BlockOrigin& origin) noexcept {
-	return allocateSlot(cache, encodeMorton64(origin));
 }
 
 GPUResult<glm::ivec3> slotToAtlasOffset(const BrickCache& cache, uint32_t slotIndex) noexcept {
@@ -316,7 +288,7 @@ GPUResult<glm::ivec3> slotToAtlasOffset(const BrickCache& cache, uint32_t slotIn
 BrickCacheStats getCacheStats(const BrickCache& cache) noexcept {
 	BrickCacheStats stats{};
 	stats.capacitySlots = cache.capacitySlots;
-	stats.residentBricks = cache.residentCount;
+	stats.residentBricks = cache.residentCount();
 	stats.lookupCount = cache.lookupCount;
 	stats.hitCount = cache.hitCount;
 	stats.evictionCount = cache.evictionCount;
@@ -328,7 +300,7 @@ BrickCacheDebugSnapshot buildBrickCacheDebugSnapshot(const BrickCache& cache) {
 	BrickCacheDebugSnapshot snapshot{};
 	snapshot.slotGridDims = cache.slotGridDims;
 	snapshot.capacitySlots = cache.capacitySlots;
-	snapshot.residentBricks = cache.residentCount;
+	snapshot.residentBricks = cache.residentCount();
 	snapshot.accessCounter = cache.accessCounter;
 	snapshot.slots.resize(cache.capacitySlots);
 

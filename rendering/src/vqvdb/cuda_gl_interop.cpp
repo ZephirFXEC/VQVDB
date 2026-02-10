@@ -11,13 +11,15 @@
 #include <cuda_gl_interop.h>
 #include <cuda_runtime.h>
 
+#include "vqvdb/cuda_utils.hpp"
+
 namespace vqvdb {
 
 namespace {
 
 cudaGraphicsResource_t toCudaResource(void* ptr) { return reinterpret_cast<cudaGraphicsResource_t>(ptr); }
 
-bool cudaOk(cudaError_t err) { return err == cudaSuccess; }
+using cuda_utils::cudaOk;
 
 }  // namespace
 

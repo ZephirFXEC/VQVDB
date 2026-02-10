@@ -7,6 +7,9 @@
 #include "vqvdb/decoder_backend.hpp"
 
 #include "vqvdb/cuda_gl_interop.hpp"
+#include "vqvdb/cuda_utils.hpp"
+
+#include <format>
 
 #if defined(VQVDB_RENDERING_ENABLE_TRT)
 
@@ -32,7 +35,7 @@ namespace {
 constexpr uint32_t kLatentElementsPerBlock = 4u * 4u * 4u;
 constexpr uint32_t kDecodedElementsPerBlock = 8u * 8u * 8u;
 
-bool cudaOk(cudaError_t err) { return err == cudaSuccess; }
+using cuda_utils::cudaOk;
 
 uint64_t fnv1a64Update(uint64_t state, const uint8_t* data, size_t len) {
 	constexpr uint64_t kPrime = 1099511628211ull;
@@ -77,9 +80,13 @@ std::string gpuArchTag() {
 
 class TRTLogger final : public nvinfer1::ILogger {
    public:
+	std::string latestMessage;
+
+	void clear() noexcept { latestMessage.clear(); }
+
 	void log(Severity severity, const char* msg) noexcept override {
-		if (severity <= Severity::kWARNING) {
-			(void)msg;
+		if (severity <= Severity::kWARNING && msg != nullptr) {
+			latestMessage = msg;
 		}
 	}
 };
@@ -119,6 +126,14 @@ struct DecoderBackend::Impl {
 
 	CudaGLInterop interop;
 	bool interopUsable{true};
+	std::string lastError;
+
+	void setLastError(std::string message) {
+		if (!logger.latestMessage.empty()) {
+			message += std::format(" | TensorRT: {}", logger.latestMessage);
+		}
+		lastError = std::move(message);
+	}
 
 	~Impl() {
 		if (dInput != nullptr) cudaFree(dInput);
@@ -128,15 +143,38 @@ struct DecoderBackend::Impl {
 	}
 };
 
+std::string parserErrorSummary(const nvonnxparser::IParser& parser) {
+	const int count = parser.getNbErrors();
+	if (count <= 0) {
+		return "ONNX parser failed with no diagnostics";
+	}
+
+	std::string summary;
+	for (int i = 0; i < count; ++i) {
+		if (const auto* err = parser.getError(i); err != nullptr && err->desc() != nullptr) {
+			if (!summary.empty()) {
+				summary += " | ";
+			}
+			summary += err->desc();
+		}
+	}
+	return summary.empty() ? "ONNX parser failed with no diagnostics" : summary;
+}
+
 DecoderBackend::DecoderBackend() : impl_(std::make_unique<Impl>()) {}
 
 DecoderBackend::~DecoderBackend() = default;
 
 DecoderResult<void> DecoderBackend::init(const std::filesystem::path& onnxModelPath, uint32_t maxBatchSize) {
+	impl_->lastError.clear();
+	impl_->logger.clear();
+
 	if (!std::filesystem::exists(onnxModelPath)) {
+		impl_->lastError = std::format("ONNX model not found: {}", onnxModelPath.string());
 		return std::unexpected(DecoderError::OnnxModelNotFound);
 	}
 	if (maxBatchSize == 0) {
+		impl_->lastError = "Invalid max batch size: 0";
 		return std::unexpected(DecoderError::InvalidInput);
 	}
 
@@ -145,6 +183,7 @@ DecoderResult<void> DecoderBackend::init(const std::filesystem::path& onnxModelP
 
 	impl_->runtime.reset(nvinfer1::createInferRuntime(impl_->logger));
 	if (!impl_->runtime) {
+		impl_->setLastError("Failed to create TensorRT runtime");
 		return std::unexpected(DecoderError::EngineBuildFailed);
 	}
 
@@ -159,6 +198,7 @@ DecoderResult<void> DecoderBackend::init(const std::filesystem::path& onnxModelP
 
 	impl_->context.reset(impl_->engine->createExecutionContext());
 	if (!impl_->context) {
+		impl_->setLastError("Failed to create TensorRT execution context");
 		return std::unexpected(DecoderError::EngineDeserializeFailed);
 	}
 
@@ -172,10 +212,12 @@ DecoderResult<void> DecoderBackend::init(const std::filesystem::path& onnxModelP
 		}
 	}
 	if (impl_->inputTensorName.empty() || impl_->outputTensorName.empty()) {
+		impl_->setLastError("Failed to discover decoder input/output tensors");
 		return std::unexpected(DecoderError::EngineDeserializeFailed);
 	}
 
 	if (impl_->stream == nullptr && !cudaOk(cudaStreamCreate(&impl_->stream))) {
+		impl_->setLastError("Failed to create CUDA stream");
 		return std::unexpected(DecoderError::CudaError);
 	}
 
@@ -192,35 +234,43 @@ DecoderResult<void> DecoderBackend::init(const std::filesystem::path& onnxModelP
 	}
 
 	if (!cudaOk(cudaMalloc(&impl_->dInput, impl_->dInputBytes)) || !cudaOk(cudaMalloc(&impl_->dOutput, impl_->dOutputBytes))) {
+		impl_->setLastError("Failed to allocate decoder CUDA buffers");
 		return std::unexpected(DecoderError::CudaError);
 	}
 
 	impl_->ready = true;
 	impl_->interopUsable = true;
+	impl_->lastError.clear();
 	return {};
 }
 
 DecoderResult<void> DecoderBackend::decodeBatch(std::span<const uint8_t> indices, uint32_t batchSize, uint32_t atlasTexture,
                                                 std::span<const glm::ivec3> slotOffsets) {
 	if (!impl_->ready || !impl_->context || !impl_->engine) {
+		impl_->lastError = "Decoder backend is not initialized";
 		return std::unexpected(DecoderError::EngineNotLoaded);
 	}
 	if (batchSize == 0 || batchSize > impl_->maxBatchSize) {
+		impl_->lastError = std::format("Invalid batch size {} (max {})", batchSize, impl_->maxBatchSize);
 		return std::unexpected(DecoderError::InvalidInput);
 	}
 	if (slotOffsets.size() != batchSize) {
+		impl_->lastError = std::format("Slot offsets count {} does not match batch {}", slotOffsets.size(), batchSize);
 		return std::unexpected(DecoderError::InvalidInput);
 	}
 	const size_t expectedInputSize = static_cast<size_t>(batchSize) * kLatentElementsPerBlock;
 	if (indices.size() < expectedInputSize) {
+		impl_->lastError = std::format("Input index bytes {} below expected {}", indices.size(), expectedInputSize);
 		return std::unexpected(DecoderError::InvalidInput);
 	}
 	if (atlasTexture == 0) {
+		impl_->lastError = "Atlas texture handle is 0";
 		return std::unexpected(DecoderError::InvalidInput);
 	}
 
 	const size_t inputBytes = expectedInputSize * sizeof(uint8_t);
 	if (!cudaOk(cudaMemcpyAsync(impl_->dInput, indices.data(), inputBytes, cudaMemcpyHostToDevice, impl_->stream))) {
+		impl_->setLastError("Failed to upload decoder inputs to CUDA");
 		return std::unexpected(DecoderError::CudaError);
 	}
 
@@ -232,16 +282,20 @@ DecoderResult<void> DecoderBackend::decodeBatch(std::span<const uint8_t> indices
 	inputDims.d[3] = 4;
 
 	if (!impl_->context->setInputShape(impl_->inputTensorName.c_str(), inputDims)) {
+		impl_->setLastError("Failed to set decoder input shape");
 		return std::unexpected(DecoderError::InferenceFailed);
 	}
 	if (!impl_->context->setTensorAddress(impl_->inputTensorName.c_str(), impl_->dInput) ||
 	    !impl_->context->setTensorAddress(impl_->outputTensorName.c_str(), impl_->dOutput)) {
+		impl_->setLastError("Failed to bind decoder input/output tensors");
 		return std::unexpected(DecoderError::InferenceFailed);
 	}
 	if (!impl_->context->enqueueV3(impl_->stream)) {
+		impl_->setLastError("TensorRT enqueueV3 failed");
 		return std::unexpected(DecoderError::InferenceFailed);
 	}
 	if (!cudaOk(cudaStreamSynchronize(impl_->stream))) {
+		impl_->setLastError("Decoder CUDA stream synchronization failed");
 		return std::unexpected(DecoderError::CudaError);
 	}
 
@@ -252,6 +306,7 @@ DecoderResult<void> DecoderBackend::decodeBatch(std::span<const uint8_t> indices
 	glGetTextureLevelParameteriv(atlasTexture, 0, GL_TEXTURE_HEIGHT, &height);
 	glGetTextureLevelParameteriv(atlasTexture, 0, GL_TEXTURE_DEPTH, &depth);
 	if (width <= 0 || height <= 0 || depth <= 0) {
+		impl_->lastError = "Atlas texture is not a valid allocated 3D texture";
 		return std::unexpected(DecoderError::InvalidInput);
 	}
 
@@ -289,9 +344,11 @@ DecoderResult<void> DecoderBackend::decodeBatch(std::span<const uint8_t> indices
 	std::vector<float> hostOutput(static_cast<size_t>(batchSize) * kDecodedElementsPerBlock);
 	const size_t outputBytes = hostOutput.size() * sizeof(float);
 	if (!cudaOk(cudaMemcpyAsync(hostOutput.data(), impl_->dOutput, outputBytes, cudaMemcpyDeviceToHost, impl_->stream))) {
+		impl_->setLastError("Failed to read decoder output from CUDA");
 		return std::unexpected(DecoderError::CudaError);
 	}
 	if (!cudaOk(cudaStreamSynchronize(impl_->stream))) {
+		impl_->setLastError("Decoder CUDA stream synchronization failed during readback");
 		return std::unexpected(DecoderError::CudaError);
 	}
 
@@ -301,36 +358,51 @@ DecoderResult<void> DecoderBackend::decodeBatch(std::span<const uint8_t> indices
 		glTextureSubImage3D(atlasTexture, 0, off.x, off.y, off.z, 8, 8, 8, GL_RED, GL_FLOAT, brickData);
 	}
 	if (glGetError() != GL_NO_ERROR) {
+		impl_->lastError = "OpenGL upload to atlas texture failed";
 		return std::unexpected(DecoderError::InteropError);
 	}
 
+	impl_->lastError.clear();
 	return {};
 }
 
 bool DecoderBackend::isReady() const noexcept { return impl_ && impl_->ready; }
 
+const std::string& DecoderBackend::lastErrorMessage() const noexcept {
+	static const std::string empty;
+	if (!impl_) {
+		return empty;
+	}
+	return impl_->lastError;
+}
+
 DecoderResult<void> DecoderBackend::buildEngine(const std::filesystem::path& onnxPath, uint32_t maxBatchSize) {
 	auto builder = std::unique_ptr<nvinfer1::IBuilder, TRTDeleter>(nvinfer1::createInferBuilder(impl_->logger));
 	if (!builder) {
+		impl_->setLastError("Failed to create TensorRT builder");
 		return std::unexpected(DecoderError::EngineBuildFailed);
 	}
 
 	const uint32_t explicitBatch = 1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
 	auto network = std::unique_ptr<nvinfer1::INetworkDefinition, TRTDeleter>(builder->createNetworkV2(explicitBatch));
 	if (!network) {
+		impl_->setLastError("Failed to create TensorRT network definition");
 		return std::unexpected(DecoderError::EngineBuildFailed);
 	}
 
 	auto parser = std::unique_ptr<nvonnxparser::IParser, TRTDeleter>(nvonnxparser::createParser(*network, impl_->logger));
 	if (!parser) {
+		impl_->setLastError("Failed to create TensorRT ONNX parser");
 		return std::unexpected(DecoderError::EngineBuildFailed);
 	}
 	if (!parser->parseFromFile(onnxPath.string().c_str(), static_cast<int>(nvinfer1::ILogger::Severity::kWARNING))) {
+		impl_->setLastError(std::format("Failed to parse ONNX model: {}", parserErrorSummary(*parser)));
 		return std::unexpected(DecoderError::EngineBuildFailed);
 	}
 
 	auto config = std::unique_ptr<nvinfer1::IBuilderConfig, TRTDeleter>(builder->createBuilderConfig());
 	if (!config) {
+		impl_->setLastError("Failed to create TensorRT builder config");
 		return std::unexpected(DecoderError::EngineBuildFailed);
 	}
 
@@ -372,6 +444,7 @@ DecoderResult<void> DecoderBackend::buildEngine(const std::filesystem::path& onn
 		if (!profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kMIN, minDims) ||
 		    !profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kOPT, optDims) ||
 		    !profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kMAX, maxDims)) {
+			impl_->setLastError(std::format("Failed to set optimization profile dimensions for input '{}'", input->getName()));
 			return std::unexpected(DecoderError::EngineBuildFailed);
 		}
 		profileUsed = true;
@@ -383,6 +456,7 @@ DecoderResult<void> DecoderBackend::buildEngine(const std::filesystem::path& onn
 
 	auto serialized = std::unique_ptr<nvinfer1::IHostMemory, TRTDeleter>(builder->buildSerializedNetwork(*network, *config));
 	if (!serialized || serialized->size() == 0) {
+		impl_->setLastError("TensorRT returned an empty serialized engine");
 		return std::unexpected(DecoderError::EngineBuildFailed);
 	}
 
@@ -398,6 +472,7 @@ DecoderResult<void> DecoderBackend::buildEngine(const std::filesystem::path& onn
 
 	impl_->engine.reset(impl_->runtime->deserializeCudaEngine(serialized->data(), serialized->size()));
 	if (!impl_->engine) {
+		impl_->setLastError("Failed to deserialize serialized TensorRT engine");
 		return std::unexpected(DecoderError::EngineDeserializeFailed);
 	}
 
@@ -406,28 +481,33 @@ DecoderResult<void> DecoderBackend::buildEngine(const std::filesystem::path& onn
 
 DecoderResult<void> DecoderBackend::loadCachedEngine(const std::filesystem::path& enginePath) {
 	if (!std::filesystem::exists(enginePath)) {
+		impl_->lastError = std::format("Engine cache not found: {}", enginePath.string());
 		return std::unexpected(DecoderError::EngineDeserializeFailed);
 	}
 
 	std::ifstream in(enginePath, std::ios::binary | std::ios::ate);
 	if (!in) {
+		impl_->lastError = std::format("Failed to open engine cache: {}", enginePath.string());
 		return std::unexpected(DecoderError::EngineDeserializeFailed);
 	}
 
 	const auto size = static_cast<size_t>(in.tellg());
 	in.seekg(0, std::ios::beg);
 	if (size == 0) {
+		impl_->lastError = std::format("Engine cache is empty: {}", enginePath.string());
 		return std::unexpected(DecoderError::EngineDeserializeFailed);
 	}
 
 	std::vector<uint8_t> data(size);
 	in.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(data.size()));
 	if (!in) {
+		impl_->lastError = std::format("Failed to read engine cache: {}", enginePath.string());
 		return std::unexpected(DecoderError::EngineDeserializeFailed);
 	}
 
 	impl_->engine.reset(impl_->runtime->deserializeCudaEngine(data.data(), data.size()));
 	if (!impl_->engine) {
+		impl_->setLastError(std::format("Failed to deserialize engine cache: {}", enginePath.string()));
 		return std::unexpected(DecoderError::EngineDeserializeFailed);
 	}
 
@@ -448,7 +528,9 @@ std::filesystem::path DecoderBackend::engineCachePath(const std::filesystem::pat
 
 namespace vqvdb {
 
-struct DecoderBackend::Impl {};
+struct DecoderBackend::Impl {
+	std::string lastError;
+};
 
 DecoderBackend::DecoderBackend() : impl_(std::make_unique<Impl>()) {}
 
@@ -456,11 +538,14 @@ DecoderBackend::~DecoderBackend() = default;
 
 DecoderResult<void> DecoderBackend::init(const std::filesystem::path& onnxModelPath, uint32_t maxBatchSize) {
 	if (!std::filesystem::exists(onnxModelPath)) {
+		impl_->lastError = std::format("ONNX model not found: {}", onnxModelPath.string());
 		return std::unexpected(DecoderError::OnnxModelNotFound);
 	}
 	if (maxBatchSize == 0) {
+		impl_->lastError = "Invalid max batch size: 0";
 		return std::unexpected(DecoderError::InvalidInput);
 	}
+	impl_->lastError = "TensorRT decoder backend is disabled at build time (VQVDB_RENDERING_ENABLE_TRT=OFF)";
 	return std::unexpected(DecoderError::EngineBuildFailed);
 }
 
@@ -470,19 +555,30 @@ DecoderResult<void> DecoderBackend::decodeBatch(std::span<const uint8_t> indices
 	(void)batchSize;
 	(void)atlasTexture;
 	(void)slotOffsets;
+	impl_->lastError = "Decoder backend unavailable because TensorRT support is disabled";
 	return std::unexpected(DecoderError::EngineNotLoaded);
 }
 
 bool DecoderBackend::isReady() const noexcept { return false; }
 
+const std::string& DecoderBackend::lastErrorMessage() const noexcept {
+	static const std::string empty;
+	if (!impl_) {
+		return empty;
+	}
+	return impl_->lastError;
+}
+
 DecoderResult<void> DecoderBackend::buildEngine(const std::filesystem::path& onnxPath, uint32_t maxBatchSize) {
 	(void)onnxPath;
 	(void)maxBatchSize;
+	impl_->lastError = "TensorRT decoder backend is disabled at build time (buildEngine unavailable)";
 	return std::unexpected(DecoderError::EngineBuildFailed);
 }
 
 DecoderResult<void> DecoderBackend::loadCachedEngine(const std::filesystem::path& enginePath) {
 	(void)enginePath;
+	impl_->lastError = "TensorRT decoder backend is disabled at build time (engine cache unavailable)";
 	return std::unexpected(DecoderError::EngineDeserializeFailed);
 }
 

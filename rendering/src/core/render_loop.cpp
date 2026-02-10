@@ -20,7 +20,6 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
-#include <glm/gtc/type_ptr.hpp>
 #include <limits>
 #include <string>
 
@@ -80,6 +79,7 @@ void RenderLoop::resetVisibilityStats() noexcept {
 	gpu.visibleCachedLastFrame = 0;
 	gpu.visibleMissingLastFrame = 0;
 	gpu.scheduledDecodesLastFrame = 0;
+	gpu.decodedBlocksLastFrame = 0;
 	gpu.occludedRequestsLastFrame = 0;
 	gpu.cacheTouchedLastFrame = 0;
 	gpu.cacheInsertedLastFrame = 0;
@@ -87,8 +87,14 @@ void RenderLoop::resetVisibilityStats() noexcept {
 }
 
 void RenderLoop::clearVisibilityDebugState() noexcept {
-	blockDebugStates.clear();
-	renderer::clearBlockDebugStates(rendererRef);
+	if (!blockDebugStates.empty()) {
+		blockDebugStates.clear();
+		lastDebugStateBlockCount = 0;
+	}
+	if (blockDebugStateUploaded) {
+		renderer::clearBlockDebugStates(rendererRef);
+		blockDebugStateUploaded = false;
+	}
 }
 
 void RenderLoop::updateVisibilityAndCache() {
@@ -146,6 +152,73 @@ void RenderLoop::updateVisibilityAndCache() {
 		}
 	}
 
+	gpu.decoderReady = gpu.decoderBackend != nullptr && gpu.decoderBackend->isReady();
+	if (gpu.decoderReady && gpu.brickCacheInitialized && gpu.brickCache.atlasTexture != 0 && !schedule.decodeRequests.empty()) {
+		std::vector<uint8_t> decodeIndices;
+		std::vector<glm::ivec3> slotOffsets;
+		decodeIndices.reserve(schedule.decodeRequests.size() * vqvdb::kIndicesPerBlock);
+		slotOffsets.reserve(schedule.decodeRequests.size());
+		bool decodeCacheUpdated = false;
+		std::string decodePrepError;
+
+		for (const vqvdb::DecodeRequest& request : schedule.decodeRequests) {
+			if (request.blockIndex >= grid.blocks.count()) {
+				continue;
+			}
+
+			uint32_t slotIndex = 0;
+			const auto slotIt = gpu.brickCache.mortonToSlot.find(request.mortonCode);
+			if (slotIt != gpu.brickCache.mortonToSlot.end()) {
+				slotIndex = slotIt->second;
+			} else {
+				const auto alloc = vqvdb::allocateSlot(gpu.brickCache, request.mortonCode);
+				if (!alloc.has_value()) {
+					decodePrepError = std::string("Cache slot allocation failed: ") + vqvdb::errorToString(alloc.error());
+					break;
+				}
+				slotIndex = alloc->slotIndex;
+				decodeCacheUpdated = true;
+				if (!alloc->wasCached) {
+					++gpu.cacheInsertedLastFrame;
+				}
+				if (alloc->evicted) {
+					++gpu.cacheEvictedLastFrame;
+				}
+			}
+
+			const auto atlasOffset = vqvdb::slotToAtlasOffset(gpu.brickCache, slotIndex);
+			if (!atlasOffset.has_value()) {
+				decodePrepError = std::string("Failed to compute atlas slot offset: ") + vqvdb::errorToString(atlasOffset.error());
+				break;
+			}
+
+			const std::span<const uint8_t> blockIndices = grid.blocks.blockIndices(request.blockIndex);
+			decodeIndices.insert(decodeIndices.end(), blockIndices.begin(), blockIndices.end());
+			slotOffsets.push_back(*atlasOffset);
+		}
+
+		if (decodePrepError.empty() && decodeCacheUpdated) {
+			const auto upload = vqvdb::uploadCacheHashTable(gpu.brickCache);
+			if (!upload.has_value()) {
+				decodePrepError = std::string("Cache hash upload failed: ") + vqvdb::errorToString(upload.error());
+			}
+		}
+
+		if (!decodePrepError.empty()) {
+			gpu.schedulerError = decodePrepError;
+		} else if (!slotOffsets.empty()) {
+			const auto decodeResult = gpu.decoderBackend->decodeBatch(decodeIndices, static_cast<uint32_t>(slotOffsets.size()),
+			                                                         gpu.brickCache.atlasTexture, slotOffsets);
+			if (!decodeResult.has_value()) {
+				gpu.decoderError = std::string("Decode failed: ") + vqvdb::errorToString(decodeResult.error());
+				gpu.schedulerError = gpu.decoderError;
+			} else {
+				gpu.decoderError.clear();
+				gpu.decodedBlocksLastFrame = static_cast<uint32_t>(slotOffsets.size());
+			}
+		}
+	}
+
 	// Build debug states from the scheduler's visible set.
 	// Use the VisibleBlock::cached flag directly — it was set by the scheduler's cache check.
 	// After cache update, newly-inserted blocks are also cached, so re-check for those.
@@ -170,16 +243,17 @@ void RenderLoop::updateVisibilityAndCache() {
 
 	if (!renderer::uploadBlockDebugStates(rendererRef, blockDebugStates)) {
 		gpu.schedulerError = "Failed to upload block debug states";
+		blockDebugStateUploaded = false;
+	} else {
+		blockDebugStateUploaded = !blockDebugStates.empty();
 	}
 }
 
 void RenderLoop::renderOcclusionDepthData(bool hasUploadedBlockData, const glm::mat4& viewProjection, int viewportY) {
-	if (uiRef.gpuState.enableDepthOcclusion && hasUploadedBlockData) {
+	const bool occlusionEnabled = uiRef.gpuState.enableDepthOcclusion && hasUploadedBlockData && uiRef.volumeState.isLoaded;
+	if (occlusionEnabled) {
 		GPU_PROFILE_SCOPE(uiRef.profiler, "Occlusion Depth Prepass");
 		renderer::drawBlockDepthPrepassInstanced(rendererRef, uiRef.gpuState.resources, viewProjection, 0, /*cullNonVisible=*/true);
-	}
-
-	if (uiRef.gpuState.enableDepthOcclusion) {
 		{
 			CPU_PROFILE_SCOPE(uiRef.profiler, "Depth Async Capture");
 			depth_pyramid::initiateAsyncCapture(depthReadback, uiRef.viewportX, viewportY, uiRef.viewportWidth, uiRef.viewportHeight);
@@ -207,6 +281,7 @@ void RenderLoop::drawFrame() {
 
 		{
 			CPU_PROFILE_SCOPE(uiRef.profiler, "Handle UI Requests");
+			ui::pollDecoderBackendInit(uiRef);
 
 			// Handle file load request
 			if (uiRef.fileLoadRequested) {
@@ -217,23 +292,6 @@ void RenderLoop::drawFrame() {
 				if (!filePath.empty()) {
 					ui::loadVQVDBFile(uiRef, filePath);
 				}
-			}
-
-			// Handle codebook load request (Milestone 1.2)
-			if (uiRef.gpuState.codebookLoadRequested) {
-				uiRef.gpuState.codebookLoadRequested = false;
-
-				std::string filePath = openFileDialog("Codebook Files (*.bin)\0*.bin\0All Files (*.*)\0*.*\0", "Open Codebook File");
-
-				if (!filePath.empty()) {
-					ui::loadAndUploadCodebook(uiRef, filePath);
-				}
-			}
-
-			// Handle codebook verify request (Milestone 1.2)
-			if (uiRef.gpuState.codebookVerifyRequested) {
-				uiRef.gpuState.codebookVerifyRequested = false;
-				ui::verifyCodebookOnGPU(uiRef);
 			}
 
 			// Handle block data upload request (Milestone 1.3)
@@ -260,6 +318,10 @@ void RenderLoop::drawFrame() {
 			if (uiRef.gpuState.brickCachePrimeRequested) {
 				uiRef.gpuState.brickCachePrimeRequested = false;
 				ui::primeBrickCacheFromLoadedBlocks(uiRef);
+			}
+			if (uiRef.gpuState.decoderInitRequested) {
+				uiRef.gpuState.decoderInitRequested = false;
+				(void)ui::initDecoderBackend(uiRef);
 			}
 
 			// Update renderer with grid transform if GPU data was uploaded (Milestone 1.4)
