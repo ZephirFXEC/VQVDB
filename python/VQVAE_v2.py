@@ -68,7 +68,10 @@ class VDBLeafDataset(Dataset):
         file_idx = np.searchsorted(self.file_offsets, idx, side="right") - 1
         local_idx = idx - self.file_offsets[file_idx]
 
-        leaf_np = self.arrays[file_idx][local_idx].astype(np.float32, copy=True)
+        leaf_np = self.arrays[file_idx][local_idx]
+        # Only copy if dtype conversion is needed
+        if leaf_np.dtype != np.float32:
+            leaf_np = leaf_np.astype(np.float32, copy=True)
         leaf = torch.from_numpy(leaf_np)
 
         if self.in_channels == 1:
@@ -77,12 +80,12 @@ class VDBLeafDataset(Dataset):
             leaf = leaf.permute(3, 0, 1, 2)  # (C, 8, 8, 8)
 
         if self.transform:
-            leaf_norm = self.transform(leaf_norm)
+            leaf = self.transform(leaf)
 
         if self.include_origins:
             origin = torch.from_numpy(
                 self.origin_arrays[file_idx][local_idx].astype(np.int32, copy=False))  # type: ignore[index]
-            return leaf_norm, origin
+            return leaf, origin
         return leaf
 
 
@@ -113,12 +116,11 @@ class VectorQuantizerEMA(nn.Module):
         permuted_x = torch.permute(x, permute_fwd).contiguous()
         flat = permuted_x.view(-1, D)
 
-        # Compute distances
-        distances = (
-                torch.sum(flat ** 2, dim=1, keepdim=True)
-                + torch.sum(self.embedding ** 2, dim=1)
-                - 2 * torch.mm(flat, self.embedding.t())
-        )
+        # Compute distances more efficiently using einsum-style operations
+        # ||x - e||^2 = ||x||^2 + ||e||^2 - 2*x·e
+        flat_norm_sq = torch.sum(flat * flat, dim=1, keepdim=True)
+        embed_norm_sq = torch.sum(self.embedding * self.embedding, dim=1)
+        distances = flat_norm_sq + embed_norm_sq - 2 * torch.mm(flat, self.embedding.t())
 
         # Get nearest codes
         encoding_indices = torch.argmin(distances, dim=1)
@@ -361,9 +363,10 @@ class VQVAE(nn.Module):
                   .view(-1, D)
                   )
 
-        distances = (torch.sum(flat_z ** 2, dim=1, keepdim=True)
-                     + torch.sum(self.quantizer.embedding ** 2, dim=1)
-                     - 2 * torch.matmul(flat_z, self.quantizer.embedding.t()))
+        # Compute distances more efficiently
+        flat_z_norm_sq = torch.sum(flat_z * flat_z, dim=1, keepdim=True)
+        embed_norm_sq = torch.sum(self.quantizer.embedding * self.quantizer.embedding, dim=1)
+        distances = flat_z_norm_sq + embed_norm_sq - 2 * torch.matmul(flat_z, self.quantizer.embedding.t())
         indices = torch.argmin(distances, dim=1)
 
         return indices.view([B] + spatial)

@@ -4,3 +4,10 @@ vcpkg
 data
 cmake-build-release
 .venv
+__pycache__
+*.pyc
+*.pyo
+*.pyi
+.pytest_cache/
+.mypy_cache/
+.tox/

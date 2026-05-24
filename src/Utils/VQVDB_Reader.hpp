@@ -78,7 +78,7 @@ class VDBStreamWriter {
 	uint32_t sharedNumEmbeddings_ = 0;
 	uint8_t sharedLatentDimCount_ = 0;
 
-	static constexpr size_t IO_BUFFER_SIZE = 4 * 1024 * 1024;
+	static constexpr size_t IO_BUFFER_SIZE = 8 * 1024 * 1024;  // 8MB buffer (increased from 4MB for better I/O performance)
 	std::vector<char> buffer_;
 	size_t bufferOffset_ = 0;
 };

@@ -6,8 +6,16 @@
  See the LICENSE file in the project root for full license text.
 """
 
+import argparse
+import os
+from pathlib import Path
+
+import torch
+import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from VQVAE_v2 import *
 
@@ -80,11 +88,14 @@ def train(args):
     if not os.path.exists(os.path.dirname(args.model_path)):
         os.makedirs(os.path.dirname(args.model_path))
 
+    # Increase num_workers for better data loading performance
+    num_workers = min(8, max(2, os.cpu_count() // 2)) if os.cpu_count() else 2
+    
     train_loader = DataLoader(
         vdb_dataset_train,
         batch_size=BATCH_SIZE,
         shuffle=True,
-        num_workers=2,
+        num_workers=num_workers,
         pin_memory=True,
         persistent_workers=True,
     )
@@ -92,7 +103,9 @@ def train(args):
     val_loader = DataLoader(
         vdb_dataset_val,
         batch_size=BATCH_SIZE,
-        shuffle=False)
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True)
 
     model = VQVAE(IN_CHANNELS, EMBEDDING_DIM, NUM_EMBEDDINGS, COMMITMENT_COST).to(device)
 
@@ -195,6 +208,11 @@ def train(args):
                     # Same loss computation for validation
                     recon_mse = F.mse_loss(recon_norm, leaves_norm)
                     recon_l1 = F.l1_loss(recon_norm, leaves_norm)
+                    
+                    # Use the same weighting as training
+                    mse_weight = 0.8
+                    l1_weight = 0.2
+                    recon_error = mse_weight * recon_mse + l1_weight * recon_l1
 
                     val_recon_loss += recon_error.item()
                     val_vq_loss += vq_loss.item()
